@@ -1,0 +1,7 @@
+packages:
+  - web
+  - worker
+
+ignoredBuiltDependencies:
+  - sharp
+  - unrs-resolver

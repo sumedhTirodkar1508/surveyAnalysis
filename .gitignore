@@ -1,0 +1,25 @@
+node_modules/
+.next/
+.turbo/
+dist/
+build/
+out/
+coverage/
+.DS_Store
+*.log
+
+# env
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Python (reserved for worker/)
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/

@@ -1,0 +1,12 @@
+{
+  "name": "survey-analysis",
+  "version": "0.0.0",
+  "private": true,
+  "packageManager": "pnpm@10.26.1",
+  "scripts": {
+    "dev": "pnpm --filter web dev",
+    "build": "pnpm --filter web build",
+    "lint": "pnpm --filter web lint",
+    "typecheck": "pnpm --filter web exec tsc --noEmit"
+  }
+}
