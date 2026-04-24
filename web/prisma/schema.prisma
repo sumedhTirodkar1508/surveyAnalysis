@@ -157,6 +157,7 @@ model SurveyVersion {
   batches   SurveyBatch[]
 
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([surveyId, versionNumber])
 }
@@ -175,6 +176,10 @@ model SurveyQuestion {
 
   fieldMappings FieldMapping[]
   responses     SurveyResponse[]
+
+  updatedAt DateTime @updatedAt
+
+  @@index([surveyVersionId, displayOrder])
 }
 
 model FieldMapping {
@@ -191,14 +196,15 @@ model FieldMapping {
   rowLabel    String?
   columnLabel String?
   sortOrder   Int            @default(0)
+  updatedAt   DateTime       @updatedAt
 }
 
 model SurveyBatch {
   id                      String        @id @default(cuid())
   surveyId                String
-  survey                  Survey        @relation(fields: [surveyId], references: [id])
+  survey                  Survey        @relation(fields: [surveyId], references: [id], onDelete: Restrict)
   surveyVersionId         String
-  surveyVersion           SurveyVersion @relation(fields: [surveyVersionId], references: [id])
+  surveyVersion           SurveyVersion @relation(fields: [surveyVersionId], references: [id], onDelete: Restrict)
   uploadedById            String
   uploadedBy              User          @relation("BatchUploadedBy", fields: [uploadedById], references: [id])
   batchName               String
@@ -259,6 +265,7 @@ model SurveyResponse {
   reviewedAt            DateTime?
 
   @@unique([submissionId, questionId])
+  @@index([questionId])
 }
 
 model ExtractionJob {
@@ -271,6 +278,9 @@ model ExtractionJob {
   logsJson     Json?
   errorMessage String?
   createdAt    DateTime    @default(now())
+
+  @@index([batchId])
+  @@index([status])
 }
 
 model FileAsset {
@@ -284,6 +294,8 @@ model FileAsset {
   mimeType    String
   size        Int
   createdAt   DateTime      @default(now())
+
+  @@unique([storagePath])
 }
 
 model ExportFile {
