@@ -1,0 +1,311 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─────────────────────────── Enums ───────────────────────────
+
+enum Role {
+  ADMIN
+  RESEARCHER
+  REVIEWER
+  VIEWER
+}
+
+enum SurveyStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+enum BatchStatus {
+  UPLOADED
+  PROCESSING
+  NEEDS_REVIEW
+  FINALIZED
+  FAILED
+}
+
+enum SubmissionStatus {
+  EXTRACTED
+  NEEDS_REVIEW
+  REVIEWED
+  FINALIZED
+}
+
+enum JobStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum QuestionType {
+  MULTI_SELECT
+  SINGLE_SELECT
+  MATRIX_SINGLE_SELECT
+  MATRIX_MULTI_SELECT
+  FREE_TEXT
+  NAME
+  OTHER_TEXT
+}
+
+enum FieldType {
+  CHECKBOX
+  MATRIX_CHECKBOX
+  TEXT_BOX
+  NAME_BOX
+}
+
+enum FileAssetType {
+  SURVEY_TEMPLATE
+  RESULT_PDF
+  PAGE_IMAGE
+  EXPORT
+}
+
+// ─────────────────────────── Auth.js models ───────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  passwordHash  String?   // credentials provider
+  role          Role      @default(VIEWER)
+
+  accounts              Account[]
+  sessions              Session[]
+  createdSurveys        Survey[]             @relation("SurveyCreatedBy")
+  uploadedBatches       SurveyBatch[]        @relation("BatchUploadedBy")
+  reviewedResponses     SurveyResponse[]     @relation("ResponseReviewedBy")
+  generatedExports      ExportFile[]         @relation("ExportGeneratedBy")
+  ownedFiles            FileAsset[]          @relation("FileOwnedBy")
+  auditLogs             AuditLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ─────────────────────────── Domain models ───────────────────────────
+
+model Survey {
+  id          String       @id @default(cuid())
+  title       String
+  description String?
+  status      SurveyStatus @default(DRAFT)
+  createdById String
+  createdBy   User         @relation("SurveyCreatedBy", fields: [createdById], references: [id])
+
+  versions SurveyVersion[]
+  batches  SurveyBatch[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model SurveyVersion {
+  id                 String  @id @default(cuid())
+  surveyId           String
+  survey             Survey  @relation(fields: [surveyId], references: [id], onDelete: Cascade)
+  versionNumber      Int
+  templateFileId     String?
+  pageCount          Int     @default(0)
+  pagesPerSubmission Int     @default(1)
+  isActive           Boolean @default(false)
+
+  questions SurveyQuestion[]
+  batches   SurveyBatch[]
+
+  createdAt DateTime @default(now())
+
+  @@unique([surveyId, versionNumber])
+}
+
+model SurveyQuestion {
+  id                String        @id @default(cuid())
+  surveyVersionId   String
+  surveyVersion     SurveyVersion @relation(fields: [surveyVersionId], references: [id], onDelete: Cascade)
+  questionNumber    String
+  questionText      String
+  questionType      QuestionType
+  optionsJson       Json?
+  matrixRowsJson    Json?
+  matrixColumnsJson Json?
+  displayOrder      Int
+
+  fieldMappings FieldMapping[]
+  responses     SurveyResponse[]
+}
+
+model FieldMapping {
+  id          String         @id @default(cuid())
+  questionId  String
+  question    SurveyQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  fieldType   FieldType
+  pageNumber  Int
+  x           Float
+  y           Float
+  width       Float
+  height      Float
+  optionLabel String?
+  rowLabel    String?
+  columnLabel String?
+  sortOrder   Int            @default(0)
+}
+
+model SurveyBatch {
+  id                      String        @id @default(cuid())
+  surveyId                String
+  survey                  Survey        @relation(fields: [surveyId], references: [id])
+  surveyVersionId         String
+  surveyVersion           SurveyVersion @relation(fields: [surveyVersionId], references: [id])
+  uploadedById            String
+  uploadedBy              User          @relation("BatchUploadedBy", fields: [uploadedById], references: [id])
+  batchName               String
+  status                  BatchStatus   @default(UPLOADED)
+  totalPages              Int?
+  detectedSubmissionCount Int?
+  errorMessage            String?
+
+  submissions SurveySubmission[]
+  jobs        ExtractionJob[]
+  pdfFiles    BatchFile[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model BatchFile {
+  id          String      @id @default(cuid())
+  batchId     String
+  batch       SurveyBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  fileId      String
+  uploadOrder Int
+  pageCount   Int?
+  createdAt   DateTime    @default(now())
+}
+
+model SurveySubmission {
+  id                       String           @id @default(cuid())
+  batchId                  String
+  batch                    SurveyBatch      @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  participantIndex         Int
+  participantNameExtracted String?
+  participantNameCorrected String?
+  confidenceScore          Float?
+  status                   SubmissionStatus @default(EXTRACTED)
+  sourceFileId             String
+  sourcePageStart          Int
+  sourcePageEnd            Int
+
+  responses SurveyResponse[]
+
+  @@index([batchId, participantIndex])
+}
+
+model SurveyResponse {
+  id                    String           @id @default(cuid())
+  submissionId          String
+  submission            SurveySubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  questionId            String
+  question              SurveyQuestion   @relation(fields: [questionId], references: [id])
+  rawExtractedValueJson Json?
+  correctedValueJson    Json?
+  finalValueJson        Json?
+  confidenceScore       Float?
+  needsReview           Boolean          @default(false)
+  reviewerId            String?
+  reviewer              User?            @relation("ResponseReviewedBy", fields: [reviewerId], references: [id])
+  reviewedAt            DateTime?
+
+  @@unique([submissionId, questionId])
+}
+
+model ExtractionJob {
+  id           String      @id @default(cuid())
+  batchId      String
+  batch        SurveyBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  status       JobStatus   @default(QUEUED)
+  startedAt    DateTime?
+  completedAt  DateTime?
+  logsJson     Json?
+  errorMessage String?
+  createdAt    DateTime    @default(now())
+}
+
+model FileAsset {
+  id          String        @id @default(cuid())
+  ownerId     String
+  owner       User          @relation("FileOwnedBy", fields: [ownerId], references: [id])
+  surveyId    String?
+  batchId     String?
+  type        FileAssetType
+  storagePath String
+  mimeType    String
+  size        Int
+  createdAt   DateTime      @default(now())
+}
+
+model ExportFile {
+  id            String   @id @default(cuid())
+  batchId       String?
+  surveyId      String
+  generatedById String
+  generatedBy   User     @relation("ExportGeneratedBy", fields: [generatedById], references: [id])
+  fileId        String
+  rowCount      Int?
+  createdAt     DateTime @default(now())
+}
+
+model AuditLog {
+  id           String   @id @default(cuid())
+  userId       String?
+  user         User?    @relation(fields: [userId], references: [id])
+  action       String
+  entityType   String
+  entityId     String
+  metadataJson Json?
+  createdAt    DateTime @default(now())
+
+  @@index([entityType, entityId])
+}
