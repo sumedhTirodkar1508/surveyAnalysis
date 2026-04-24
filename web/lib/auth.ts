@@ -56,6 +56,18 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         token.id = user.id;
         token.role = (user as { role: Role }).role;
       }
+      // Re-hydrate role from DB on every token refresh (handles role changes without re-login)
+      if (token.id && !user) {
+        try {
+          const dbUser = await prisma.user.findUnique({
+            where: { id: token.id as string },
+            select: { role: true },
+          });
+          if (dbUser) token.role = dbUser.role;
+        } catch {
+          // Non-fatal: keep the existing token role
+        }
+      }
       return token;
     },
     async session({ session, token }) {

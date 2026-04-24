@@ -1,0 +1,20 @@
+[tool.poetry]
+name = "survey-worker"
+version = "0.1.0"
+description = "Python worker for survey analysis"
+authors = ["Sumedh"]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+fastapi = "^0.111.0"
+uvicorn = "^0.30.1"
+asyncpg = "^0.29.0"
+supabase = "^2.5.1"
+PyMuPDF = "^1.24.4"
+opencv-python-headless = "^4.10.0.82"
+paddleocr = "^2.8.0"
+httpx = "^0.27.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
