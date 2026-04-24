@@ -1,20 +1,17 @@
-const PgBoss = require("pg-boss");
+import { PgBoss } from "pg-boss";
 
-const connectionString = process.env.DATABASE_URL;
-
-if (!connectionString) {
-  throw new Error("DATABASE_URL is missing");
+if (!process.env.DATABASE_URL) {
+  throw new Error("DATABASE_URL is missing — pg-boss cannot start");
 }
 
-const boss = new PgBoss(connectionString);
+const boss = new PgBoss(process.env.DATABASE_URL);
 
 let started = false;
 
-export async function enqueueJob(name: string, data: any) {
+export async function enqueueJob(name: string, data: object | null): Promise<string | null> {
   if (!started) {
     await boss.start();
     started = true;
   }
-  const jobId = await boss.send(name, data);
-  return jobId;
+  return boss.send(name, data);
 }

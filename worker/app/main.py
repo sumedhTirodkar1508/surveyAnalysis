@@ -1,4 +1,5 @@
 import os
+import json
 import asyncio
 import logging
 from contextlib import asynccontextmanager
@@ -65,9 +66,9 @@ async def poll_pgboss(pool: asyncpg.Pool):
                     except Exception as e:
                         logger.error(f"Job {job_id} failed: {e}")
                         await conn.execute(
-                            "UPDATE pgboss.job SET state = 'failed', completed_on = now(), output = $2 WHERE id = $1", 
-                            job_id, 
-                            str(e)
+                            "UPDATE pgboss.job SET state = 'failed', completed_on = now(), output = $2::jsonb WHERE id = $1",
+                            job_id,
+                            json.dumps({"error": str(e), "job": name}),
                         )
                 else:
                     await asyncio.sleep(2)
