@@ -2,6 +2,7 @@
 
 import bcrypt from "bcryptjs";
 import { z } from "zod";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 
 const signUpSchema = z.object({
@@ -33,16 +34,22 @@ export async function signUpAction(
 
   const { name, email, password } = parsed.data;
 
-  const existing = await prisma.user.findUnique({ where: { email } });
-  if (existing) {
-    return { error: "An account with this email already exists." };
-  }
-
+  // Hash unconditionally before insert to avoid timing oracle on email existence
   const passwordHash = await bcrypt.hash(password, 12);
 
-  await prisma.user.create({
-    data: { name, email, passwordHash, role: "VIEWER" },
-  });
+  try {
+    await prisma.user.create({
+      data: { name, email, passwordHash, role: "VIEWER" },
+    });
+  } catch (e) {
+    if (
+      e instanceof Prisma.PrismaClientKnownRequestError &&
+      e.code === "P2002"
+    ) {
+      return { error: "An account with this email already exists." };
+    }
+    throw e;
+  }
 
   return { success: true };
 }

@@ -4,9 +4,13 @@ import { NextResponse } from "next/server";
 export default auth((req) => {
   const isLoggedIn = !!req.auth;
   const isAuthPage = req.nextUrl.pathname.startsWith("/auth");
-  const isApi = req.nextUrl.pathname.startsWith("/api");
+  // Allow NextAuth's own /api/auth/* callbacks through unauthenticated.
+  // All other /api/* routes are also gated here — per-route requireRole()
+  // handles authorization, but we prevent completely unauthenticated requests
+  // from reaching them without even a session check.
+  const isAuthApi = req.nextUrl.pathname.startsWith("/api/auth");
 
-  if (!isLoggedIn && !isAuthPage && !isApi) {
+  if (!isLoggedIn && !isAuthPage && !isAuthApi) {
     return NextResponse.redirect(new URL("/auth/sign-in", req.url));
   }
   return NextResponse.next();
