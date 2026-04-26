@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
 export default async function BatchDetailPage({
   params,
 }: {
-  params: { surveyId: string; batchId: string };
+  params: Promise<{ surveyId: string; batchId: string }>;
 }) {
   const { surveyId, batchId } = await params;
 

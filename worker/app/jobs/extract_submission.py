@@ -4,13 +4,15 @@ Main submission extraction job handler.
 For each submission:
 1. Download the source PDF from Supabase.
 2. Render each page to an image (PDF → PNG).
-3. Deskew and optionally align to the template page.
-4. For each FieldMapping:
-   - CHECKBOX/MATRIX_CHECKBOX → run checkbox detector.
-   - TEXT_BOX/NAME_BOX → run OCR.
-5. Aggregate results per question → upsert SurveyResponse rows.
-6. Upload cropped preview images for reviewer.
-7. Update submission status.
+3. Deskew page.
+4. Find per-page translation offset vs template (phase correlation).
+5. For each FieldMapping:
+   - CHECKBOX/MATRIX_CHECKBOX → detect_checkbox() with template baseline +
+     per-page offset.
+   - TEXT_BOX/NAME_BOX → OCR.
+6. Aggregate results per question → upsert SurveyResponse rows.
+7. Upload cropped preview images for reviewer.
+8. Update submission status.
 """
 import asyncio
 import io
@@ -19,7 +21,7 @@ import logging
 import os
 import tempfile
 import uuid
-from typing import Any
+from typing import Any, Optional, Tuple
 
 import asyncpg
 import cv2
@@ -27,9 +29,9 @@ import fitz  # PyMuPDF
 import numpy as np
 
 from app.main import DATABASE_URL, supabase
-from app.cv.deskew import deskew_image, align_to_template
-from app.cv.checkbox import detect_checkbox, extract_region_image
-from app.ocr.provider import get_ocr_provider
+from app.cv.deskew import deskew_image, find_page_translation
+from app.cv.checkbox import extract_region_image
+from app.cv.gemini_batch import extract_answers_batch_gemini
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,7 @@ async def _process_submission(conn: asyncpg.Connection, submission_id: str):
     submission = await conn.fetchrow("""
         SELECT
             s.id, s."batchId", s."sourceFileId", s."participantIndex",
+            s."sourcePageStart", s."sourcePageEnd",
             sb."surveyVersionId", sb."surveyId",
             sv."templateFileId", sv."pageCount"
         FROM "SurveySubmission" s
@@ -92,79 +95,141 @@ async def _process_submission(conn: asyncpg.Connection, submission_id: str):
 
     pdf_bytes = supabase.storage.from_(STORAGE_BUCKET).download(source_file["storagePath"])
 
-    # ── 4. Download template pages (cached from render step) ─────────
-    template_pages = await conn.fetch("""
+    # ── 4. Download template page images ─────────────────────────────
+    # Ordered by storagePath so page-000.png → index 0, page-001.png → 1, …
+    template_page_rows = await conn.fetch("""
         SELECT "storagePath" FROM "FileAsset"
         WHERE "surveyId" = $1 AND type = 'PAGE_IMAGE'
         ORDER BY "storagePath"
     """, survey_id)
 
     template_images: dict[int, np.ndarray] = {}
-    for i, tp in enumerate(template_pages):
+    for i, row in enumerate(template_page_rows):
         try:
-            tmpl_bytes = supabase.storage.from_(STORAGE_BUCKET).download(tp["storagePath"])
+            tmpl_bytes = supabase.storage.from_(STORAGE_BUCKET).download(row["storagePath"])
             arr = np.frombuffer(tmpl_bytes, np.uint8)
             img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            template_images[i] = img
+            if img is not None:
+                template_images[i] = img
         except Exception as e:
             logger.warning(f"Could not load template page {i}: {e}")
 
-    # ── 5. Render scan pages to images ───────────────────────────────
+    # ── 5. Render scan pages + compute per-page translation offsets ───
     pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     scan_pages: dict[int, np.ndarray] = {}
-    for page_num in range(len(pdf_doc)):
-        page = pdf_doc.load_page(page_num)
+    page_offsets: dict[int, Tuple[int, int]] = {}   # relative_page → (dx_px, dy_px)
+
+    page_start = submission["sourcePageStart"]
+    page_end = submission["sourcePageEnd"]
+
+    logger.info(f"Rendering scan pages {page_start}-{page_end} for submission {submission_id}")
+
+    for page_idx in range(page_start, page_end + 1):
+        if page_idx >= len(pdf_doc):
+            break
+
+        relative_page = page_idx - page_start
+
+        page = pdf_doc.load_page(page_idx)
         pix = page.get_pixmap(dpi=200)
         img_arr = np.frombuffer(pix.tobytes("png"), np.uint8)
         img = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
-        if img is not None:
-            # Deskew
-            img = deskew_image(img)
-            # Align to template if available
-            tmpl = template_images.get(page_num)
-            if tmpl is not None:
-                aligned = align_to_template(img, tmpl)
-                if aligned is not None:
-                    img = aligned
-        scan_pages[page_num] = img
 
-    # ── 6. Extract responses ─────────────────────────────────────────
-    ocr = get_ocr_provider()
-    # Group mappings by question
+        if img is None:
+            continue
+
+        # Deskew (minor rotation correction)
+        img = deskew_image(img)
+
+        # Per-page translation via phase correlation with template
+        dx_px, dy_px = 0, 0
+        tmpl = template_images.get(relative_page)
+        if tmpl is not None:
+            offset = find_page_translation(img, tmpl)
+            if offset is not None:
+                dx_px, dy_px = int(round(offset[0])), int(round(offset[1]))
+                logger.info(
+                    f"Page {page_idx} (P{submission['participantIndex']} rel={relative_page}): "
+                    f"offset dx={dx_px} dy={dy_px}"
+                )
+            else:
+                logger.debug(f"Page {page_idx}: translation not found, using dx=0 dy=0")
+
+        scan_pages[relative_page] = img
+        page_offsets[relative_page] = (dx_px, dy_px)
+
+    pdf_doc.close()
+
+    # ── 6. Extract responses via Gemini Batch ─────────────────────────
     question_mappings: dict[str, list] = {}
     for m in mappings:
-        qid = m["questionId"]
-        question_mappings.setdefault(qid, []).append(m)
+        question_mappings.setdefault(m["questionId"], []).append(m)
 
-    responses: dict[str, Any] = {}  # questionId → extracted value
+    responses: dict[str, Any] = {}
     confidence_scores: list[float] = []
 
+    tasks = []
+    # Pass 1: Gather all crops into tasks
     for question_id, q_mappings in question_mappings.items():
         field_type = q_mappings[0]["fieldType"]
+        is_checkbox = field_type in ("CHECKBOX", "MATRIX_CHECKBOX")
 
-        if field_type in ("CHECKBOX", "MATRIX_CHECKBOX"):
-            # Each mapping represents one selectable option
+        for m in q_mappings:
+            rel_page = m["pageNumber"]
+            page_img = scan_pages.get(rel_page)
+            if page_img is None:
+                continue
+
+            dx_px, dy_px = page_offsets.get(rel_page, (0, 0))
+            crop = extract_region_image(
+                page_img, m["x"], m["y"], m["width"], m["height"],
+                dx_px=dx_px, dy_px=dy_px,
+            )
+            if crop.size == 0:
+                continue
+                
+            task_id = f"{question_id}_{m['id']}"
+            tasks.append({
+                "id": task_id,
+                "question_id": question_id,
+                "mapping": m,
+                "page_img": page_img,
+                "dx_px": dx_px,
+                "dy_px": dy_px,
+                "type": "checkbox" if is_checkbox else "text",
+                "crop": crop,
+                "label": m.get("optionLabel", "")
+            })
+
+    # Execute batch AI extraction in 1 request
+    batch_results = extract_answers_batch_gemini(tasks)
+    
+    # Pass 2: Reconstruct responses per question and upload previews
+    for question_id, q_mappings in question_mappings.items():
+        field_type = q_mappings[0]["fieldType"]
+        is_checkbox = field_type in ("CHECKBOX", "MATRIX_CHECKBOX")
+        
+        q_tasks = [t for t in tasks if t["question_id"] == question_id]
+        
+        if is_checkbox:
             selected_options = []
             option_confidences = []
-
-            for m in q_mappings:
-                page_img = scan_pages.get(m["pageNumber"])
-                if page_img is None:
-                    continue
-
-                result = detect_checkbox(page_img, m["x"], m["y"], m["width"], m["height"])
-                option_confidences.append(result.confidence)
-
-                # Upload cropped preview
+            for t in q_tasks:
+                res = batch_results.get(t["id"])
+                if not res: continue
+                
                 preview_path = await _upload_crop_preview(
-                    page_img, m, survey_id, submission_id
+                    t["page_img"], t["mapping"], survey_id, submission_id,
+                    dx_px=t["dx_px"], dy_px=t["dy_px"],
                 )
-
-                if result.checked:
-                    label = m["optionLabel"] or f"option_{m['id']}"
+                option_confidences.append(res.get("confidence", 0.0))
+                
+                if res.get("checked"):
+                    label = t["mapping"]["optionLabel"] or f"option_{t['mapping']['id']}"
                     selected_options.append({
                         "label": label,
-                        "fill_ratio": result.fill_ratio,
+                        "fill_ratio": 0.0,
+                        "net_fill": 0.0,
                         "preview_path": preview_path,
                     })
 
@@ -175,26 +240,21 @@ async def _process_submission(conn: asyncpg.Connection, submission_id: str):
                 "selected": selected_options,
                 "confidence": round(avg_conf, 3),
             }
-
-        elif field_type in ("TEXT_BOX", "NAME_BOX"):
+        else:
             texts = []
             ocr_confidences = []
-
-            for m in q_mappings:
-                page_img = scan_pages.get(m["pageNumber"])
-                if page_img is None:
-                    continue
-
-                region = extract_region_image(page_img, m["x"], m["y"], m["width"], m["height"])
-                if region.size == 0:
-                    continue
-
-                text, conf = ocr.recognize(region)
-                texts.append(text)
-                ocr_confidences.append(conf)
-
-                await _upload_crop_preview(page_img, m, survey_id, submission_id)
-
+            for t in q_tasks:
+                res = batch_results.get(t["id"])
+                if not res: continue
+                
+                await _upload_crop_preview(
+                    t["page_img"], t["mapping"], survey_id, submission_id,
+                    dx_px=t["dx_px"], dy_px=t["dy_px"],
+                )
+                if res.get("text"):
+                    texts.append(res["text"])
+                ocr_confidences.append(res.get("confidence", 0.0))
+                
             combined_text = " ".join(t for t in texts if t).strip()
             avg_conf = float(np.mean(ocr_confidences)) if ocr_confidences else 0.0
             confidence_scores.append(avg_conf)
@@ -204,17 +264,17 @@ async def _process_submission(conn: asyncpg.Connection, submission_id: str):
                 "confidence": round(avg_conf, 3),
             }
 
+
     # ── 7. Upsert SurveyResponse rows ────────────────────────────────
     overall_confidence = float(np.mean(confidence_scores)) if confidence_scores else 0.5
-
-    # Determine if it needs human review (confidence below threshold)
     needs_review = overall_confidence < 0.75
 
     for question_id, raw_value in responses.items():
         await conn.execute("""
             INSERT INTO "SurveyResponse"
-                (id, "submissionId", "questionId", "rawExtractedValueJson", "confidenceScore", "needsReview")
-            VALUES ($1, $2, $3, $4, $5, $6)
+                (id, "submissionId", "questionId", "rawExtractedValueJson",
+                 "confidenceScore", "needsReview")
+            VALUES ($1, $2, $3, $4::jsonb, $5, $6)
             ON CONFLICT ("submissionId", "questionId")
             DO UPDATE SET
                 "rawExtractedValueJson" = EXCLUDED."rawExtractedValueJson",
@@ -238,21 +298,28 @@ async def _upload_crop_preview(
     mapping: asyncpg.Record,
     survey_id: str,
     submission_id: str,
+    dx_px: int = 0,
+    dy_px: int = 0,
 ) -> str:
-    """Crop and upload a preview image for this mapping region. Returns storage path."""
+    """Crop and upload a preview image for this mapping region."""
     try:
         region = extract_region_image(
-            page_img, mapping["x"], mapping["y"], mapping["width"], mapping["height"]
+            page_img, mapping["x"], mapping["y"],
+            mapping["width"], mapping["height"],
+            dx_px=dx_px, dy_px=dy_px,
         )
         if region.size == 0:
             return ""
 
         _, buf = cv2.imencode(".jpg", region, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        png_bytes = buf.tobytes()
+        jpg_bytes = buf.tobytes()
 
-        path = f"surveys/{survey_id}/submissions/{submission_id}/previews/mapping-{mapping['id']}.jpg"
+        path = (
+            f"surveys/{survey_id}/submissions/{submission_id}/"
+            f"previews/mapping-{mapping['id']}.jpg"
+        )
         supabase.storage.from_(STORAGE_BUCKET).upload(
-            file=png_bytes,
+            file=jpg_bytes,
             path=path,
             file_options={"content-type": "image/jpeg", "upsert": "true"},
         )
@@ -274,3 +341,20 @@ async def _mark_submission_complete(
         SET status = $2, "confidenceScore" = $3
         WHERE id = $1
     """, submission_id, new_status, confidence)
+
+    # Check if all submissions in batch are done; if so, set batch to NEEDS_REVIEW
+    batch_done = await conn.fetchval("""
+        SELECT COUNT(*) = 0
+        FROM "SurveySubmission"
+        WHERE "batchId" = (SELECT "batchId" FROM "SurveySubmission" WHERE id = $1)
+          AND status NOT IN ('NEEDS_REVIEW', 'EXTRACTED', 'REVIEWED', 'FINALIZED')
+    """, submission_id)
+
+    if batch_done:
+        await conn.execute("""
+            UPDATE "SurveyBatch"
+            SET status = 'NEEDS_REVIEW'
+            WHERE id = (SELECT "batchId" FROM "SurveySubmission" WHERE id = $1)
+              AND status = 'PROCESSING'
+        """, submission_id)
+        logger.info(f"All submissions done — batch set to NEEDS_REVIEW")

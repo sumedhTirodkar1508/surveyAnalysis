@@ -1,25 +1,58 @@
+# Dependencies
 node_modules/
+.pnpm-store/
+
+# Next.js
 .next/
 .turbo/
-dist/
-build/
 out/
-coverage/
-.DS_Store
-*.log
 
-# env
-.env
-.env.local
-.env.*.local
-!.env.example
-
-# Python (reserved for worker/)
+# Python
 __pycache__/
 *.pyc
 .venv/
 venv/
+.pytest_cache/
+.mypy_cache/
 
-# IDE
-.idea/
-.vscode/
+# Environment Variables
+.env
+.env.local
+.env.*.local
+! .env.example
+**/.env
+**/.env.local
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# System Files
+.DS_Store
+Thumbs.db
+
+# Build Output
+dist/
+build/
+
+# AI/Assistant Cache/State
+.agents/
+.claude/
+.gemini/
+.antigravity/
+
+# Temporary Files
+tmp/
+temp/
+graphify-out/
+
+# Debug Scripts (contain sensitive keys)
+worker/debug_*.py
+test_template.pdf
+web/proxy.ts
+worker/debug_local_registration.py
+worker/debug_registration.py
+worker/debug_visual.py

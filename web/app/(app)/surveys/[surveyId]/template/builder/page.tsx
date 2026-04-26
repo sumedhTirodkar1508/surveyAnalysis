@@ -6,7 +6,7 @@ import { BuilderUX } from "./BuilderUX";
 export default async function TemplateBuilderPage({
   params,
 }: {
-  params: { surveyId: string };
+  params: Promise<{ surveyId: string }>;
 }) {
   const { surveyId } = await params;
   
@@ -65,6 +65,7 @@ export default async function TemplateBuilderPage({
         versionId={targetVersion.id}
         questions={targetVersion.questions}
         pageUrls={pageUrls}
+        isActive={targetVersion.isActive}
       />
     </div>
   );

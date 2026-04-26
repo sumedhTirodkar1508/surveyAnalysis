@@ -51,7 +51,6 @@ export function PageCanvas({
 
     // Load background image
     fabric.Image.fromURL(imageUrl).then((img) => {
-      // Calculate scale to fit container width
       const containerWidth = containerRef.current?.clientWidth || 800;
       const scale = containerWidth / (img.width || 800);
       
@@ -60,7 +59,13 @@ export function PageCanvas({
         height: (img.height || 1100) * scale,
       });
 
-      img.scale(scale);
+      img.set({
+        scaleX: scale,
+        scaleY: scale,
+        originX: 'left',
+        originY: 'top'
+      });
+      
       canvas.backgroundImage = img;
       canvas.renderAll();
     }).catch(err => console.error("Failed to load image", err));

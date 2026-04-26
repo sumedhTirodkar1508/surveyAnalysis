@@ -5,7 +5,7 @@ import ExcelJS from "exceljs";
 
 export async function GET(
   req: Request,
-  { params }: { params: { batchId: string } }
+  { params }: { params: Promise<{ batchId: string }> }
 ) {
   try {
     const user = await requireUser();
@@ -105,8 +105,8 @@ export async function GET(
 
         const parsed = val as any;
         if (parsed.type === "checkbox") {
-          const selected: string[] = parsed.selected ?? [];
-          rowData.push(selected.join(", "));
+          const selected: any[] = parsed.selected ?? [];
+          rowData.push(selected.map((s) => s?.label || s).join(", "));
         } else if (parsed.type === "text") {
           rowData.push(parsed.value ?? "");
         } else {

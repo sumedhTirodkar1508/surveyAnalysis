@@ -18,9 +18,16 @@ interface ResponseCardProps {
 
 function CheckboxResponseCard({ response, previewUrls, onSave }: ResponseCardProps) {
   const raw = response.rawExtractedValueJson as any;
-  const existing = (response.correctedValueJson ?? raw) as any;
-  const options: string[] = raw?.selected?.map((s: any) => s.label) ?? [];
-  const initialSelected: string[] = existing?.selected ?? options;
+  const existing = response.correctedValueJson as any;
+  
+  // All possible options come from the mappings
+  const options: string[] = response.question.fieldMappings.map((m: any) => m.optionLabel || `option_${m.id}`);
+  
+  // What is actually checked? 
+  // 'existing' (if saved via UI) will be an array of strings.
+  // 'raw' (from worker) will be an array of objects: { label, fill_ratio, preview_path }.
+  const rawSelected: string[] = raw?.selected?.map((s: any) => s.label) ?? [];
+  const initialSelected: string[] = existing?.selected ?? rawSelected;
 
   const [selected, setSelected] = useState<string[]>(initialSelected);
   const [pending, startTransition] = useTransition();

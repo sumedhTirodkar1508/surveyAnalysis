@@ -41,8 +41,8 @@ export async function POST(req: Request) {
       storagePath = `surveys/${surveyId}/versions/draft/template-${fileId}.pdf`; 
       // We don't have versionId until attachTemplate, so we just use draft + fileId
     } else if (kind === "RESULT_PDF") {
-      if (!surveyId || !batchId) return NextResponse.json({ error: "surveyId and batchId are required for RESULT_PDF" }, { status: 400 });
-      storagePath = `surveys/${surveyId}/batches/${batchId}/original/${fileId}.pdf`;
+      if (!surveyId) return NextResponse.json({ error: "surveyId is required for RESULT_PDF" }, { status: 400 });
+      storagePath = `surveys/${surveyId}/pending/${fileId}.pdf`;
     } else {
       return NextResponse.json({ error: "Upload kind not supported via client" }, { status: 400 });
     }

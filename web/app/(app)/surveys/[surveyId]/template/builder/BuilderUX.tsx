@@ -5,11 +5,11 @@ import { PageCanvas, BoundingBox } from "@/components/template-builder/PageCanva
 import { Button } from "@/components/ui/button";
 import { ChevronLeft, ChevronRight, Trash2 } from "lucide-react";
 import { upsertMapping, deleteMapping } from "@/_actions/mappings";
-import { activateVersion } from "@/_actions/versions";
+import { activateVersion, deactivateVersion } from "@/_actions/versions";
 import { toast } from "sonner";
 import { useRouter } from "next/navigation";
 
-export function BuilderUX({ surveyId, versionId, questions, pageUrls }: any) {
+export function BuilderUX({ surveyId, versionId, questions, pageUrls, isActive }: any) {
   const router = useRouter();
   const [currentPage, setCurrentPage] = useState(0);
   const [selectedQuestionId, setSelectedQuestionId] = useState<string | null>(null);
@@ -43,17 +43,21 @@ export function BuilderUX({ surveyId, versionId, questions, pageUrls }: any) {
       return;
     }
 
-    let optionLabel = undefined;
+    let optionLabel: string | undefined = undefined;
     let fieldType = "TEXT_BOX" as import("@prisma/client").FieldType;
     
-    if (["CHECKBOX_MULTIPLE", "RADIO_SINGLE"].includes(selectedQuestion.questionType)) {
-      optionLabel = prompt("Enter the option value for this box (e.g. 'Yes', 'No', 'Option A'):");
-      if (!optionLabel) return;
+    if (["MULTI_SELECT", "SINGLE_SELECT"].includes(selectedQuestion.questionType)) {
+      const label = prompt("Enter the option label for this checkbox (e.g. 'Smartphone', 'Tablet/iPad'):");
+      if (!label) return;
+      optionLabel = label;
       fieldType = "CHECKBOX" as import("@prisma/client").FieldType;
-    } else if (selectedQuestion.questionType === "MATRIX") {
-      optionLabel = prompt("Enter the matrix cell identifier (e.g. 'Row1-Col1'):");
-      if (!optionLabel) return;
+    } else if (["MATRIX_SINGLE_SELECT", "MATRIX_MULTI_SELECT"].includes(selectedQuestion.questionType)) {
+      const label = prompt("Enter the matrix cell identifier (e.g. 'SeveralTimesADay-SmartPhone'):");
+      if (!label) return;
+      optionLabel = label;
       fieldType = "MATRIX_CHECKBOX" as import("@prisma/client").FieldType;
+    } else if (selectedQuestion.questionType === "NAME") {
+      fieldType = "NAME_BOX" as import("@prisma/client").FieldType;
     }
 
     try {
@@ -92,7 +96,7 @@ export function BuilderUX({ surveyId, versionId, questions, pageUrls }: any) {
       });
       router.refresh();
     } catch (err: any) {
-      toast.error("Failed to update box");
+      toast.error(err.message || "Failed to update box");
     }
   };
 
@@ -101,7 +105,7 @@ export function BuilderUX({ surveyId, versionId, questions, pageUrls }: any) {
       await deleteMapping(id);
       router.refresh();
     } catch (err: any) {
-      toast.error("Failed to delete box");
+      toast.error(err.message || "Failed to delete box");
     }
   };
 
@@ -111,14 +115,19 @@ export function BuilderUX({ surveyId, versionId, questions, pageUrls }: any) {
     await handleBoxDelete(id);
   };
 
-  const handleActivate = async () => {
+  const handleActivateToggle = async () => {
     setActivating(true);
     try {
-      await activateVersion(versionId);
-      toast.success("Version activated successfully!");
-      router.push(`/surveys/${surveyId}`);
+      if (isActive) {
+        await deactivateVersion(versionId);
+        toast.success("Version deactivated.");
+      } else {
+        await activateVersion(versionId);
+        toast.success("Version activated successfully!");
+      }
+      router.refresh();
     } catch (err: any) {
-      toast.error(err.message || "Failed to activate version");
+      toast.error(err.message || "Failed to change version status");
     } finally {
       setActivating(false);
     }
@@ -176,8 +185,8 @@ export function BuilderUX({ surveyId, versionId, questions, pageUrls }: any) {
       <div className="w-80 border-l bg-white flex flex-col shrink-0">
         <div className="h-14 border-b flex items-center justify-between px-4 shrink-0">
           <h3 className="font-semibold">Questions</h3>
-          <Button size="sm" onClick={handleActivate} disabled={activating}>
-            {activating ? "..." : "Activate"}
+          <Button size="sm" variant={isActive ? "outline" : "default"} onClick={handleActivateToggle} disabled={activating}>
+            {activating ? "..." : (isActive ? "Deactivate" : "Activate")}
           </Button>
         </div>
         <div className="flex-1 overflow-y-auto p-4 space-y-2">

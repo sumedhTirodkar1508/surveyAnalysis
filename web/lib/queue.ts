@@ -13,5 +13,7 @@ export async function enqueueJob(name: string, data: object | null): Promise<str
     await boss.start();
     started = true;
   }
+
+  // pg-boss v10+ auto-creates the queue with all required defaults on first send()
   return boss.send(name, data);
 }

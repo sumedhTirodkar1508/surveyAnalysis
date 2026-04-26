@@ -53,7 +53,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   callbacks: {
     async jwt({ token, user }) {
       if (user) {
-        token.id = user.id;
+        token.id = user.id as string;
         token.role = (user as { role: Role }).role;
       }
       // Re-hydrate role from DB on token refresh so admin role changes take effect

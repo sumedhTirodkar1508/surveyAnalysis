@@ -5,11 +5,12 @@ import { ArrowLeft } from "lucide-react";
 import Link from "next/link";
 import { TemplateUploader } from "./TemplateUploader";
 import { QuestionEditor } from "@/components/template-builder/QuestionEditor";
+import { ExtractionPoller } from "./ExtractionPoller";
 
 export default async function SurveyTemplatePage({
   params,
 }: {
-  params: { surveyId: string };
+  params: Promise<{ surveyId: string }>;
 }) {
   const { surveyId } = await params;
   
@@ -69,8 +70,17 @@ export default async function SurveyTemplatePage({
               </div>
             ))}
             {survey.versions.flatMap(v => v.id === targetVersion.id ? v.questions : []).length === 0 && (
-              <div className="text-center py-10 text-neutral-500 border border-dashed rounded-md">
-                No questions added yet. Add questions before configuring bounding boxes.
+              <div className="text-center py-10 border border-dashed rounded-md space-y-3">
+                <div className="flex items-center justify-center gap-2 text-blue-600">
+                  <span className="inline-block w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full" style={{animation:"spin 1s linear infinite"}} />
+                  <span className="font-medium">AI is analyzing your survey to extract questions…</span>
+                </div>
+                <p className="text-sm text-neutral-500">
+                  Gemini Vision is reading your template pages. This takes ~15 seconds.<br />
+                  The page will update automatically when done. You can also add questions manually.
+                </p>
+                <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+                <ExtractionPoller hasQuestions={false} />
               </div>
             )}
           </div>

@@ -59,6 +59,9 @@ export async function activateVersion(versionId: string) {
   });
 
   if (!version) throw new Error("Not found");
+  if (version.questions.length === 0) {
+    throw new Error("Cannot activate a version with no questions.");
+  }
 
   // Validate that every question has >= 1 mapping
   for (const q of version.questions) {
@@ -81,4 +84,22 @@ export async function activateVersion(versionId: string) {
 
   revalidatePath(`/surveys/${version.surveyId}`);
   return version;
+}
+
+export async function deactivateVersion(versionId: string) {
+  await requireRole(["ADMIN", "RESEARCHER"]);
+
+  const version = await prisma.surveyVersion.findUnique({
+    where: { id: versionId },
+  });
+
+  if (!version) throw new Error("Not found");
+
+  const updated = await prisma.surveyVersion.update({
+    where: { id: versionId },
+    data: { isActive: false }
+  });
+
+  revalidatePath(`/surveys/${version.surveyId}`);
+  return updated;
 }

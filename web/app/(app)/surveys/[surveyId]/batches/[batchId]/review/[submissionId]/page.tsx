@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
 export default async function ReviewSubmissionPage({
   params,
 }: {
-  params: { surveyId: string; batchId: string; submissionId: string };
+  params: Promise<{ surveyId: string; batchId: string; submissionId: string }>;
 }) {
   const { surveyId, batchId, submissionId } = await params;
 

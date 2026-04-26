@@ -75,11 +75,14 @@ async def handle_render_template(data: dict):
                 WHERE id = $2
             """, page_count, version_id)
 
+            page_image_bytes: list[bytes] = []  # collected for AI question extraction
+
             for i in range(page_count):
                 page = doc.load_page(i)
                 # Render at 200 DPI
                 pix = page.get_pixmap(dpi=200)
                 png_bytes = pix.tobytes("png")
+                page_image_bytes.append(png_bytes)
                 
                 # Upload PNG
                 # Path: surveys/{surveyId}/versions/{versionId}/template-pages/page-{n:03}.png
@@ -88,7 +91,7 @@ async def handle_render_template(data: dict):
                 supabase.storage.from_("survey-files").upload(
                     file=png_bytes,
                     path=img_path,
-                    file_options={"content-type": "image/png"}
+                    file_options={"content-type": "image/png", "upsert": "true"}
                 )
                 
                 # Create FileAsset row for this page image
@@ -99,10 +102,26 @@ async def handle_render_template(data: dict):
                 """, str(uuid.uuid4()), owner_id, survey_id, img_path, len(png_bytes))
                 
                 logger.info(f"Rendered and uploaded page {i+1}/{page_count}")
+
         finally:
             import os
             os.remove(tf_path)
 
         logger.info(f"Successfully processed template for version {version_id}")
+
+        # ── AI Question Extraction ─────────────────────────────────────
+        # Send rendered page images to Gemini to auto-populate SurveyQuestion rows.
+        # This runs after the template is fully rendered so pages are available.
+        try:
+            from app.jobs.analyze_template import extract_and_save_questions
+            n_saved = await extract_and_save_questions(conn, version_id, page_image_bytes)
+            if n_saved > 0:
+                logger.info(f"AI extracted and saved {n_saved} questions for version {version_id}")
+            else:
+                logger.info("AI question extraction skipped or returned 0 questions (no GEMINI_API_KEY?)")
+        except Exception as ai_err:
+            # Non-fatal: template render succeeded even if AI extraction fails
+            logger.warning(f"AI question extraction failed (non-fatal): {ai_err}")
+
     finally:
         await conn.close()

@@ -5,14 +5,12 @@ import { createSignedDownloadUrl } from "@/lib/storage";
 
 export async function GET(
   req: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const user = await requireUser();
-    
-    // params is a promise in next 15 for route handlers
-    const resolvedParams = await Promise.resolve(params);
-    const { id } = resolvedParams;
+
+    const { id } = await params;
 
     if (!id) {
       return NextResponse.json({ error: "Missing file ID" }, { status: 400 });

@@ -1,7 +1,8 @@
 """
-OCR interface and PaddleOCR implementation.
+OCR interface — Tesseract implementation.
 
-Provides a simple interface for extracting text from image regions.
+PaddleOCR requires paddlepaddle which has no ARM Mac wheel and therefore
+cannot be used in this environment. Tesseract is used as the primary engine.
 """
 import logging
 import numpy as np
@@ -25,43 +26,8 @@ class OcrProvider(ABC):
         ...
 
 
-class PaddleOcrProvider(OcrProvider):
-    """PaddleOCR-based text recognition."""
-
-    def __init__(self, lang: str = "en"):
-        from paddleocr import PaddleOCR
-        self._ocr = PaddleOCR(
-            use_angle_cls=True,
-            lang=lang,
-            show_log=False,
-        )
-
-    def recognize(self, image: np.ndarray) -> tuple[str, float]:
-        try:
-            result = self._ocr.ocr(image, cls=True)
-            if not result or not result[0]:
-                return ("", 0.0)
-
-            lines = []
-            confidences = []
-            for line in result[0]:
-                # Each item: [[box], [text, confidence]]
-                if len(line) >= 2 and line[1]:
-                    text, conf = line[1]
-                    lines.append(text.strip())
-                    confidences.append(conf)
-
-            full_text = " ".join(lines).strip()
-            avg_conf = float(np.mean(confidences)) if confidences else 0.0
-            return (full_text, round(avg_conf, 3))
-
-        except Exception as e:
-            logger.error(f"PaddleOCR error: {e}")
-            return ("", 0.0)
-
-
 class TesseractOcrProvider(OcrProvider):
-    """Tesseract-based text recognition (fallback)."""
+    """Tesseract-based text recognition."""
 
     def recognize(self, image: np.ndarray) -> tuple[str, float]:
         try:
@@ -97,15 +63,9 @@ _provider: Optional[OcrProvider] = None
 
 
 def get_ocr_provider() -> OcrProvider:
-    """
-    Get the default OCR provider. Tries PaddleOCR first, falls back to Tesseract.
-    """
+    """Get the OCR provider (Tesseract)."""
     global _provider
     if _provider is None:
-        try:
-            _provider = PaddleOcrProvider()
-            logger.info("Using PaddleOCR provider")
-        except Exception as e:
-            logger.warning(f"PaddleOCR unavailable ({e}), falling back to Tesseract")
-            _provider = TesseractOcrProvider()
+        _provider = TesseractOcrProvider()
+        logger.info("Using Tesseract OCR provider")
     return _provider

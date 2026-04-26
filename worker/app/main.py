@@ -6,6 +6,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import asyncpg
 from supabase import create_client, Client
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,9 +40,21 @@ async def poll_pgboss(pool: asyncpg.Pool):
     while True:
         try:
             async with pool.acquire() as conn:
+                # Check if pgboss schema exists to avoid silent failures
+                table_exists = await conn.fetchval("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE  table_schema = 'pgboss'
+                        AND    table_name   = 'job'
+                    );
+                """)
+                
+                if not table_exists:
+                    logger.warning("pgboss.job table not found. Waiting for Web App to initialize pg-boss schema...")
+                    await asyncio.sleep(10)
+                    continue
+
                 # Fetch one job
-                # NOTE: pg-boss schema is usually `pgboss.job`
-                # If pg-boss isn't initialized yet, this might fail, so we catch errors.
                 job = await conn.fetchrow("""
                     SELECT id, name, data 
                     FROM pgboss.job 
@@ -50,6 +66,8 @@ async def poll_pgboss(pool: asyncpg.Pool):
                 
                 if job:
                     job_id, name, data = job["id"], job["name"], job["data"]
+                    if isinstance(data, str):
+                        data = json.loads(data)
                     logger.info(f"Picked up job {job_id} ({name})")
                     
                     # Mark as active
