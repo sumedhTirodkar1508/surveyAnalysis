@@ -30,10 +30,59 @@ export async function upsertQuestion(data: {
 
   let question;
   if (id) {
+    // Fetch existing state so we can detect changes that invalidate prior extractions.
+    const existing = await prisma.surveyQuestion.findUnique({
+      where: { id },
+      select: { questionType: true, optionsJson: true },
+    });
+
     question = await prisma.surveyQuestion.update({
       where: { id },
       data: rest,
     });
+
+    // ── Staleness tracking ──────────────────────────────────────────────────
+    // If questionType or optionsJson changed, every already-extracted submission
+    // for this version is now stale — its answer for this question was extracted
+    // with the old schema and may no longer be valid.
+    if (existing) {
+      const typeChanged = existing.questionType !== data.questionType;
+      const optionsChanged =
+        JSON.stringify(existing.optionsJson) !== JSON.stringify(data.optionsJson ?? null);
+
+      if (typeChanged || optionsChanged) {
+        // Find all non-finalized submissions tied to this survey version.
+        const affectedSubmissions = await prisma.surveySubmission.findMany({
+          where: {
+            batch: { surveyVersionId },
+            status: { not: "FINALIZED" },
+            // Only mark submissions that have actually been extracted (have a confidence score)
+            confidenceScore: { not: null },
+          },
+          select: { id: true, staleQuestionIds: true },
+        });
+
+        if (affectedSubmissions.length > 0) {
+          // Merge the changed questionId into each submission's staleQuestionIds array
+          // (preserving any other stale IDs accumulated from earlier draft edits).
+          await prisma.$transaction(
+            affectedSubmissions.map((sub) => {
+              const existing = (sub.staleQuestionIds as string[] | null) ?? [];
+              const merged = Array.from(new Set([...existing, id]));
+              return prisma.surveySubmission.update({
+                where: { id: sub.id },
+                data: {
+                  isStale: true,
+                  status: "NEEDS_REVIEW",
+                  confidenceScore: 0.5,
+                  staleQuestionIds: merged,
+                },
+              });
+            })
+          );
+        }
+      }
+    }
   } else {
     question = await prisma.surveyQuestion.create({
       data: {
@@ -74,7 +123,7 @@ export async function reorderQuestions(surveyVersionId: string, orderedIds: stri
   if (!version) throw new Error("Version not found");
   if (version.isActive) throw new Error("Cannot modify an active version.");
 
-  const updates = orderedIds.map((id, index) => 
+  const updates = orderedIds.map((id, index) =>
     prisma.surveyQuestion.update({
       where: { id },
       data: { displayOrder: index },

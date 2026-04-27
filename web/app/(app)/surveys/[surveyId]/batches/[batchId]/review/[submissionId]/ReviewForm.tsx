@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { CheckSquare, Square, AlertCircle, CheckCircle2, User } from "lucide-react";
+import { CheckSquare, Square, AlertCircle, CheckCircle2, User, Braces, ChevronDown } from "lucide-react";
 import { saveResponseCorrection, finalizeSubmission, correctParticipantName } from "@/_actions/review";
 import { toast } from "sonner";
 import Image from "next/image";
@@ -88,15 +88,81 @@ function CheckboxResponseCard({ response, previewUrls, onSave }: ResponseCardPro
   );
 }
 
+// ─── Collapsible JSON editor (for matrix / multi-select answers) ──────────────
+
+interface CollapsibleJsonEditorProps {
+  initialText: string;
+  onSave: (text: string) => Promise<void>;
+}
+
+function CollapsibleJsonEditor({ initialText, onSave }: CollapsibleJsonEditorProps) {
+  const [open, setOpen] = useState(true);  // default open so matrix data is immediately visible
+  const [text, setText] = useState(initialText);
+  const [pending, start] = useTransition();
+
+  const handleSave = () =>
+    start(async () => {
+      await onSave(text);
+    });
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="flex items-center gap-1.5 text-xs text-blue-600 hover:underline"
+      >
+        <Braces className="w-3.5 h-3.5" />
+        Edit Grid Data (JSON)
+        <ChevronDown className="w-3 h-3 text-blue-400" />
+      </button>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        className="font-mono text-xs border rounded-md px-3 py-2 w-full max-w-lg min-h-[110px] resize-y focus:outline-none focus:ring-2 focus:ring-neutral-300 bg-neutral-50"
+        placeholder="JSON data…"
+        autoFocus
+      />
+      <div className="flex gap-2">
+        <Button size="sm" onClick={handleSave} disabled={pending}>
+          {pending ? "Saving…" : "Save"}
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => setOpen(false)}>
+          Collapse
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Text / matrix response card ──────────────────────────────────────────────
+
 function TextResponseCard({ response, previewUrls, onSave }: ResponseCardProps) {
   const raw = response.rawExtractedValueJson as any;
   const existing = response.correctedValueJson as any;
-  const [value, setValue] = useState<string>(existing?.value ?? raw?.value ?? "");
+
+  // raw.value may be a plain string OR a complex type (array / object) for
+  // MULTI_SELECT / matrix questions extracted by the AI.
+  const rawValue = existing?.value ?? raw?.value;
+  const isComplex = rawValue !== null && rawValue !== undefined && typeof rawValue !== "string";
+
+  const [text, setText] = useState<string>(
+    isComplex ? JSON.stringify(rawValue, null, 2) : (rawValue ?? "")
+  );
   const [pending, startTransition] = useTransition();
 
   const handleSave = () => {
     startTransition(async () => {
-      await onSave({ type: "text", value, corrected: true });
+      let saveValue: any = text;
+      if (isComplex) {
+        try { saveValue = JSON.parse(text); } catch { /* keep as plain string */ }
+      }
+      await onSave({ type: "text", value: saveValue, corrected: true });
     });
   };
 
@@ -114,17 +180,30 @@ function TextResponseCard({ response, previewUrls, onSave }: ResponseCardProps) 
           className="h-14 w-auto border rounded object-contain bg-neutral-50"
         />
       )}
-      <div className="flex gap-2">
-        <Input
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          className="max-w-sm"
-          placeholder="Extracted text..."
+      {isComplex ? (
+        // Matrix / complex answer: hide JSON behind an expand button to keep
+        // the card list clean and prevent [object Object] rendering.
+        <CollapsibleJsonEditor
+          initialText={text}
+          onSave={async (t) => {
+            let saveValue: any = t;
+            try { saveValue = JSON.parse(t); } catch { /* keep string */ }
+            await onSave({ type: "text", value: saveValue, corrected: true });
+          }}
         />
-        <Button size="sm" onClick={handleSave} disabled={pending}>
-          {pending ? "..." : "Save"}
-        </Button>
-      </div>
+      ) : (
+        <div className="flex gap-2 items-center">
+          <Input
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            className="max-w-sm"
+            placeholder="Extracted text…"
+          />
+          <Button size="sm" onClick={handleSave} disabled={pending} className="shrink-0">
+            {pending ? "…" : "Save"}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

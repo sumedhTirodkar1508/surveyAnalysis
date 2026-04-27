@@ -2,9 +2,11 @@ import { prisma } from "@/lib/db";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, RefreshCw, Download } from "lucide-react";
+import { ArrowLeft, RefreshCw, Download, ClipboardList, AlertTriangle, Sparkles } from "lucide-react";
 import { BatchStatusBadge } from "@/components/batches/BatchStatusBadge";
 import { SubmissionsTable } from "@/components/batches/SubmissionsTable";
+import { BatchPoller } from "@/components/batches/BatchPoller";
+import { SyncStaleButton } from "@/components/batches/SyncStaleButton";
 
 export const dynamic = "force-dynamic";
 
@@ -39,9 +41,17 @@ export default async function BatchDetailPage({
   const finalizedCount = batch.submissions.filter(
     (s) => s.status === "FINALIZED"
   ).length;
+  // True when ≥1 submission was just reprocessed (confidenceScore reset to NULL).
+  // BatchPoller uses this to keep polling even when batch status is NEEDS_REVIEW.
+  const hasNullScores = batch.submissions.some((s) => s.confidenceScore === null);
+
+  // Count stale submissions (template was edited in draft after extraction).
+  const staleCount = batch.submissions.filter((s) => (s as any).isStale === true).length;
 
   return (
     <div className="space-y-6">
+      {/* Auto-refresh while extraction is in progress OR a reprocess job is running */}
+      <BatchPoller batchId={batchId} initialStatus={batch.status} hasNullScores={hasNullScores} />
       {/* Header */}
       <div className="flex items-center gap-4">
         <Link href={`/surveys/${surveyId}`}>
@@ -59,12 +69,19 @@ export default async function BatchDetailPage({
           </p>
         </div>
         <div className="flex gap-2">
-          <a href={`/api/batches/${batchId}/export`} download>
-            <Button variant="outline" size="sm">
+          {batch._count.submissions > 0 ? (
+            <a href={`/api/batches/${batchId}/export`} download>
+              <Button variant="outline" size="sm">
+                <Download className="w-4 h-4 mr-2" />
+                Export to Excel
+              </Button>
+            </a>
+          ) : (
+            <Button variant="outline" size="sm" disabled>
               <Download className="w-4 h-4 mr-2" />
-              Export Excel
+              Export to Excel
             </Button>
-          </a>
+          )}
           <Link href={`/surveys/${surveyId}/batches/${batchId}`}>
             <Button variant="outline" size="sm">
               <RefreshCw className="w-4 h-4 mr-2" />
@@ -92,12 +109,73 @@ export default async function BatchDetailPage({
         ))}
       </div>
 
-      {/* Extraction job progress */}
-      {latestJob && latestJob.status !== "COMPLETED" && (
+      {/* Extraction job progress — only while the batch is actively being processed and job is not finished */}
+      {batch.status === "PROCESSING" && latestJob && latestJob.status !== "COMPLETED" && (
         <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
           {latestJob.status === "QUEUED" && "⏳ Extraction job is queued. The worker will pick it up shortly."}
-          {latestJob.status === "PROCESSING" && "⚙️ Extraction is in progress. Refresh to see updates."}
+          {latestJob.status === "PROCESSING" &&
+            "⚙️ Extraction is in progress. This page will update automatically."}
           {latestJob.status === "FAILED" && `❌ Extraction failed: ${latestJob.errorMessage ?? "Unknown error"}`}
+        </div>
+      )}
+
+      {/* Stale submissions banner — template was edited after extraction */}
+      {staleCount > 0 && batch.status !== "FINALIZED" && (
+        <div className="bg-amber-50 border border-amber-300 rounded-lg px-5 py-4 flex items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-medium text-amber-900">
+                {staleCount} submission{staleCount !== 1 ? "s" : ""} are stale
+              </p>
+              <p className="text-sm text-amber-700 mt-0.5">
+                The survey template was updated since these submissions were extracted.
+                Only the changed question{staleCount !== 1 ? "s" : ""} will be re-extracted — all other answers are preserved.
+              </p>
+            </div>
+          </div>
+          <SyncStaleButton batchId={batchId} staleCount={staleCount} />
+        </div>
+      )}
+
+      {/* Bulk Review CTA — only while there is something to review */}
+      {batch.status === "NEEDS_REVIEW" && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg px-5 py-4 flex items-center justify-between gap-4">
+          <div>
+            <p className="font-medium text-blue-900">Ready for review</p>
+            <p className="text-sm text-blue-700 mt-0.5">
+              Review all participant responses on one page, then lock the batch for export.
+            </p>
+          </div>
+          <Link href={`/surveys/${surveyId}/batches/${batchId}/bulk-review`}>
+            <Button className="bg-blue-600 hover:bg-blue-700 gap-2 shrink-0">
+              <ClipboardList className="w-4 h-4" />
+              Bulk Review &amp; Finalize
+            </Button>
+          </Link>
+        </div>
+      )}
+
+      {/* Community Insights CTA — visible once batch is finalized */}
+      {batch.status === "FINALIZED" && (
+        <div className="bg-violet-50 border border-violet-200 rounded-lg px-5 py-4 flex items-center justify-between gap-4">
+          <div>
+            <p className="font-medium text-violet-900">Community Insights available</p>
+            <p className="text-sm text-violet-700 mt-0.5">
+              Generate an AI-powered needs report with executive summary and recommendations.
+              {batch.analysisStatus === "COMPLETE" && " Report is ready to view."}
+              {batch.analysisStatus === "PROCESSING" && " Report is being generated…"}
+              {batch.analysisStatus === "QUEUED" && " Report generation is queued."}
+            </p>
+          </div>
+          <Link href={`/surveys/${surveyId}/batches/${batchId}/analysis`}>
+            <Button className="bg-violet-600 hover:bg-violet-700 gap-2 shrink-0">
+              <Sparkles className="w-4 h-4" />
+              {batch.analysisStatus === "COMPLETE"
+                ? "View Report"
+                : "View Community Insights"}
+            </Button>
+          </Link>
         </div>
       )}
 
@@ -107,7 +185,9 @@ export default async function BatchDetailPage({
           <h2 className="font-semibold text-lg">Submissions</h2>
           {needsReviewCount > 0 && (
             <Link href={`/surveys/${surveyId}/batches/${batchId}/review`}>
-              <Button>Review {needsReviewCount} Submissions</Button>
+              <Button variant="outline" size="sm">
+                Review individually
+              </Button>
             </Link>
           )}
         </div>

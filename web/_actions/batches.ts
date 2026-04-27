@@ -43,19 +43,6 @@ export async function createBatch(surveyId: string, name: string, fileIds: strin
     }))
   });
 
-  // Create one SurveySubmission per uploaded file
-  // participantIndex is 1-based; sourcePageStart/End will be updated by the worker
-  await prisma.surveySubmission.createMany({
-    data: fileIds.map((fileId, idx) => ({
-      batchId: batch.id,
-      participantIndex: idx + 1,
-      sourceFileId: fileId,
-      sourcePageStart: 0,
-      sourcePageEnd: 0,
-      // status defaults to NEEDS_REVIEW per schema
-    }))
-  });
-
   // Create an ExtractionJob record for tracking
   await prisma.extractionJob.create({
     data: {
@@ -70,6 +57,69 @@ export async function createBatch(surveyId: string, name: string, fileIds: strin
 
   revalidatePath(`/surveys/${surveyId}`);
   return batch;
+}
+
+/** Lightweight poll-safe status check — only reads one column. */
+export async function getBatchStatus(batchId: string): Promise<string> {
+  await requireRole(["ADMIN", "RESEARCHER", "REVIEWER"]);
+  const row = await prisma.surveyBatch.findUnique({
+    where: { id: batchId },
+    select: { status: true },
+  });
+  return row?.status ?? "FAILED";
+}
+
+/**
+ * Extended poll check used by BatchPoller.
+ * Returns both the batch status and how many submissions are still being
+ * processed (confidenceScore IS NULL — the worker's "not yet extracted" sentinel).
+ * A non-zero pendingCount means a reprocess job is in flight even when the
+ * batch status itself hasn't changed from NEEDS_REVIEW.
+ */
+export async function getBatchProcessingState(batchId: string): Promise<{
+  status: string;
+  pendingCount: number;
+}> {
+  await requireRole(["ADMIN", "RESEARCHER", "REVIEWER"]);
+  const [batch, pendingCount] = await Promise.all([
+    prisma.surveyBatch.findUnique({
+      where: { id: batchId },
+      select: { status: true },
+    }),
+    prisma.surveySubmission.count({
+      where: { batchId, confidenceScore: null },
+    }),
+  ]);
+  return { status: batch?.status ?? "FAILED", pendingCount };
+}
+
+/**
+ * Enqueues a batch.analyze job for the given batch.
+ * Immediately flips analysisStatus to "QUEUED" so the UI reflects the
+ * pending state before the worker picks the job up.
+ */
+export async function triggerBatchAnalysis(batchId: string): Promise<void> {
+  await requireRole(["ADMIN", "RESEARCHER"]);
+
+  // Verify the batch exists and is in a finalized state.
+  const batch = await prisma.surveyBatch.findUnique({
+    where: { id: batchId },
+    select: { id: true, surveyId: true, status: true, analysisStatus: true },
+  });
+  if (!batch) throw new Error("Batch not found");
+  if (batch.status !== "FINALIZED")
+    throw new Error("Batch must be FINALIZED before running analysis");
+
+  // Mark as queued immediately so the button disables.
+  await prisma.surveyBatch.update({
+    where: { id: batchId },
+    data: { analysisStatus: "QUEUED" },
+  });
+
+  const { enqueueJob } = await import("@/lib/queue");
+  await enqueueJob("batch.analyze", { batchId });
+
+  revalidatePath(`/surveys/${batch.surveyId}/batches/${batchId}`);
 }
 
 export async function getBatch(batchId: string) {

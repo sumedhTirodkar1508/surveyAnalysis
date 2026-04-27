@@ -71,7 +71,7 @@ def _extract_questions_single_request(page_image_bytes: list[bytes]) -> list[dic
         response = None
         for attempt in range(max_retries):
             try:
-                # Using gemini-2.5-flash as requested to avoid 'latest' alias congestion
+                # Using gemini-2.5-flash
                 response = client.models.generate_content(
                     model="gemini-2.5-flash",
                     contents=content_parts,

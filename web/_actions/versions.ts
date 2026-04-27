@@ -25,8 +25,15 @@ export async function attachTemplate(versionId: string, fileAssetId: string, pag
   return version;
 }
 
-export async function createDraftVersion(surveyId: string) {
+export async function createDraftVersion(
+  surveyId: string,
+  pagesPerSubmission: number = 1,
+) {
   await requireRole(["ADMIN", "RESEARCHER"]);
+
+  if (pagesPerSubmission < 1 || !Number.isInteger(pagesPerSubmission)) {
+    throw new Error("pagesPerSubmission must be a positive integer.");
+  }
 
   // Find latest version to determine new version number
   const versions = await prisma.surveyVersion.findMany({
@@ -43,6 +50,7 @@ export async function createDraftVersion(surveyId: string) {
       versionNumber: nextVersion,
       pageCount: 0,
       isActive: false,
+      pagesPerSubmission,
     }
   });
 
@@ -50,24 +58,58 @@ export async function createDraftVersion(surveyId: string) {
   return version;
 }
 
+/**
+ * Update mutable config on a draft version.
+ * Call this from the template page to set pagesPerSubmission before activating.
+ * Blocked once the version is active to prevent silently breaking in-flight batches.
+ */
+export async function updateVersionConfig(
+  versionId: string,
+  config: { pagesPerSubmission?: number },
+) {
+  await requireRole(["ADMIN", "RESEARCHER"]);
+
+  const version = await prisma.surveyVersion.findUnique({ where: { id: versionId } });
+  if (!version) throw new Error("Version not found.");
+  if (version.isActive) {
+    throw new Error(
+      "Cannot change pagesPerSubmission on an active version — doing so would break in-flight batches. " +
+      "Create a new draft version instead."
+    );
+  }
+
+  if (
+    config.pagesPerSubmission !== undefined &&
+    (config.pagesPerSubmission < 1 || !Number.isInteger(config.pagesPerSubmission))
+  ) {
+    throw new Error("pagesPerSubmission must be a positive integer.");
+  }
+
+  const updated = await prisma.surveyVersion.update({
+    where: { id: versionId },
+    data: {
+      ...(config.pagesPerSubmission !== undefined && {
+        pagesPerSubmission: config.pagesPerSubmission,
+      }),
+    },
+  });
+
+  revalidatePath(`/surveys/${version.surveyId}`);
+  revalidatePath(`/surveys/${version.surveyId}/template`);
+  return updated;
+}
+
 export async function activateVersion(versionId: string) {
   await requireRole(["ADMIN", "RESEARCHER"]);
 
   const version = await prisma.surveyVersion.findUnique({
     where: { id: versionId },
-    include: { questions: { include: { fieldMappings: true } } }
+    include: { questions: true }
   });
 
   if (!version) throw new Error("Not found");
   if (version.questions.length === 0) {
     throw new Error("Cannot activate a version with no questions.");
-  }
-
-  // Validate that every question has >= 1 mapping
-  for (const q of version.questions) {
-    if (q.fieldMappings.length === 0) {
-      throw new Error(`Question ${q.questionNumber} has no mappings.`);
-    }
   }
 
   // Unset prior active

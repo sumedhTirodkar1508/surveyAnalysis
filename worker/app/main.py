@@ -27,72 +27,93 @@ if SUPABASE_URL and SUPABASE_KEY:
 from app.jobs.render_template import handle_render_template
 from app.jobs.extract_batch import handle_extract_batch
 from app.jobs.extract_submission import handle_extract_submission
+from app.jobs.analyze_batch import handle_analyze_batch
 
 JOB_HANDLERS = {
     "template.render": handle_render_template,
     "batch.extract": handle_extract_batch,
     "submission.extract": handle_extract_submission,
+    "batch.analyze": handle_analyze_batch,
 }
 
 # Poll loop
 async def poll_pgboss(pool: asyncpg.Pool):
     logger.info("Starting pg-boss poller...")
-    while True:
-        try:
-            async with pool.acquire() as conn:
-                # Check if pgboss schema exists to avoid silent failures
-                table_exists = await conn.fetchval("""
-                    SELECT EXISTS (
-                        SELECT FROM information_schema.tables 
-                        WHERE  table_schema = 'pgboss'
-                        AND    table_name   = 'job'
-                    );
-                """)
-                
-                if not table_exists:
-                    logger.warning("pgboss.job table not found. Waiting for Web App to initialize pg-boss schema...")
-                    await asyncio.sleep(10)
-                    continue
+    try:
+        while True:
+            try:
+                async with pool.acquire() as conn:
+                    # Check if pgboss schema exists to avoid silent failures
+                    table_exists = await conn.fetchval("""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables
+                            WHERE  table_schema = 'pgboss'
+                            AND    table_name   = 'job'
+                        );
+                    """)
 
-                # Fetch one job
-                job = await conn.fetchrow("""
-                    SELECT id, name, data 
-                    FROM pgboss.job 
-                    WHERE state = 'created' 
-                    ORDER BY priority DESC, created_on ASC 
-                    FOR UPDATE SKIP LOCKED 
-                    LIMIT 1
-                """)
-                
-                if job:
-                    job_id, name, data = job["id"], job["name"], job["data"]
-                    if isinstance(data, str):
-                        data = json.loads(data)
-                    logger.info(f"Picked up job {job_id} ({name})")
-                    
-                    # Mark as active
-                    await conn.execute("UPDATE pgboss.job SET state = 'active', started_on = now() WHERE id = $1", job_id)
-                    
-                    try:
-                        handler = JOB_HANDLERS.get(name)
-                        if handler:
-                            await handler(data)
-                            await conn.execute("UPDATE pgboss.job SET state = 'completed', completed_on = now() WHERE id = $1", job_id)
-                            logger.info(f"Job {job_id} completed.")
-                        else:
-                            raise ValueError(f"No handler for job name: {name}")
-                    except Exception as e:
-                        logger.error(f"Job {job_id} failed: {e}")
+                    if not table_exists:
+                        logger.warning("pgboss.job table not found. Waiting for Web App to initialize pg-boss schema...")
+                        await asyncio.sleep(10)
+                        continue
+
+                    # Fetch one job
+                    job = await conn.fetchrow("""
+                        SELECT id, name, data
+                        FROM pgboss.job
+                        WHERE state = 'created'
+                        ORDER BY priority DESC, created_on ASC
+                        FOR UPDATE SKIP LOCKED
+                        LIMIT 1
+                    """)
+
+                    if job:
+                        job_id, name, data = job["id"], job["name"], job["data"]
+                        if isinstance(data, str):
+                            data = json.loads(data)
+                        logger.info(f"Picked up job {job_id} ({name})")
+
+                        # Mark as active
                         await conn.execute(
-                            "UPDATE pgboss.job SET state = 'failed', completed_on = now(), output = $2::jsonb WHERE id = $1",
+                            "UPDATE pgboss.job SET state = 'active', started_on = now() WHERE id = $1",
                             job_id,
-                            json.dumps({"error": str(e), "job": name}),
                         )
-                else:
-                    await asyncio.sleep(2)
-        except Exception as e:
-            logger.error(f"Poller error: {e}")
-            await asyncio.sleep(5)
+
+                        try:
+                            handler = JOB_HANDLERS.get(name)
+                            if handler:
+                                await handler(data)
+                                await conn.execute(
+                                    "UPDATE pgboss.job SET state = 'completed', completed_on = now() WHERE id = $1",
+                                    job_id,
+                                )
+                                logger.info(f"Job {job_id} completed.")
+                            else:
+                                raise ValueError(f"No handler for job name: {name}")
+                        except asyncio.CancelledError:
+                            # Shutdown mid-job: leave the job as 'active' so pg-boss
+                            # will expire and requeue it after the expiry window.
+                            logger.warning(f"Job {job_id} interrupted by shutdown — will be retried.")
+                            raise  # re-raise so the outer CancelledError handler sees it
+                        except Exception as e:
+                            logger.error(f"Job {job_id} failed: {e}")
+                            await conn.execute(
+                                "UPDATE pgboss.job SET state = 'failed', completed_on = now(), output = $2::jsonb WHERE id = $1",
+                                job_id,
+                                json.dumps({"error": str(e), "job": name}),
+                            )
+                    else:
+                        await asyncio.sleep(2)
+
+            except asyncio.CancelledError:
+                raise  # bubble up to the outer handler
+            except Exception as e:
+                logger.error(f"Poller error: {e}")
+                await asyncio.sleep(5)
+
+    except asyncio.CancelledError:
+        logger.info("Worker shutting down gracefully...")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -100,13 +121,20 @@ async def lifespan(app: FastAPI):
         logger.warning("PG_CONNECTION_STRING is missing. Poller will not start.")
         yield
         return
-        
+
     pool = await asyncpg.create_pool(DATABASE_URL)
     app.state.pool = pool
-    
+
     task = asyncio.create_task(poll_pgboss(pool))
     yield
+
+    # Cancel the poller and wait for it to finish its current cleanup
+    # before closing the DB pool so no in-flight queries get cut off.
     task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass  # expected — the task caught it and logged the shutdown message
     await pool.close()
 
 app = FastAPI(lifespan=lifespan)

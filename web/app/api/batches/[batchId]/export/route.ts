@@ -1,21 +1,18 @@
-import { NextResponse } from "next/server";
-import { requireUser } from "@/lib/authz";
+import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import ExcelJS from "exceljs";
 
 export async function GET(
-  req: Request,
+  req: NextRequest,
   { params }: { params: Promise<{ batchId: string }> }
 ) {
-  try {
-    const user = await requireUser();
-    const { batchId } = await params;
+  const { batchId } = await params;
 
-    // Fetch batch with all finalized submissions and their responses
+  try {
+    // 1. Fetch the batch with version and questions
     const batch = await prisma.surveyBatch.findUnique({
       where: { id: batchId },
       include: {
-        survey: true,
         surveyVersion: {
           include: {
             questions: {
@@ -23,149 +20,111 @@ export async function GET(
             },
           },
         },
-        submissions: {
-          orderBy: { participantIndex: "asc" },
-          include: {
-            responses: {
-              include: { question: true },
-            },
-          },
-        },
       },
     });
 
     if (!batch) {
-      return NextResponse.json({ error: "Batch not found" }, { status: 404 });
+      return new NextResponse("Batch not found", { status: 404 });
     }
 
-    const questions = batch.surveyVersion.questions;
-
-    // Build Excel workbook
-    const workbook = new ExcelJS.Workbook();
-    workbook.creator = "Survey Digitization App";
-    workbook.created = new Date();
-
-    const sheet = workbook.addWorksheet("Survey Data", {
-      pageSetup: { fitToPage: true, orientation: "landscape" },
+    // 2. Fetch all submissions for this batch
+    const submissions = await prisma.surveySubmission.findMany({
+      where: {
+        batchId,
+        status: { in: ["EXTRACTED", "NEEDS_REVIEW", "REVIEWED", "FINALIZED"] },
+      },
+      include: {
+        responses: {
+          include: {
+            question: true,
+          },
+        },
+      },
+      orderBy: { participantIndex: "asc" },
     });
 
-    // Header row
-    const headerRow = [
-      "Participant #",
-      "Name",
-      "Status",
-      ...questions.map((q) => `Q${q.questionNumber}: ${q.questionText.substring(0, 50)}`),
-    ];
-    sheet.addRow(headerRow);
+    // 3. Create Excel workbook
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet("Survey Results");
 
-    // Style header
-    const header = sheet.getRow(1);
-    header.font = { bold: true, color: { argb: "FFFFFFFF" } };
-    header.fill = {
+    // 4. Define Columns
+    const questions = batch.surveyVersion.questions;
+    const columns = [
+      { header: "Participant Identity", key: "identity", width: 25 },
+      { header: "Confidence Score", key: "confidence", width: 15 },
+      ...questions.map((q) => ({
+        header: `${q.questionNumber}: ${q.questionText}`,
+        key: q.id,
+        width: 30,
+      })),
+    ];
+    worksheet.columns = columns;
+
+    // Style the header
+    worksheet.getRow(1).font = { bold: true };
+    worksheet.getRow(1).fill = {
       type: "pattern",
       pattern: "solid",
-      fgColor: { argb: "FF1E3A5F" },
+      fgColor: { argb: "FFE0E0E0" },
     };
-    header.height = 24;
-    header.alignment = { vertical: "middle", wrapText: true };
 
-    // Freeze header
-    sheet.views = [{ state: "frozen", xSplit: 0, ySplit: 1 }];
+    // 5. Add Data Rows
+    submissions.forEach((submission) => {
+      const rowData: any = {
+        identity: submission.participantNameCorrected || submission.participantNameExtracted || "Anonymous",
+        confidence: submission.confidenceScore ? `${(submission.confidenceScore * 100).toFixed(0)}%` : "N/A",
+      };
 
-    // Data rows
-    for (const submission of batch.submissions) {
-      const responseMap = new Map(
-        submission.responses.map((r) => [r.questionId, r])
-      );
+      // Map responses to question IDs
+      submission.responses.forEach((resp) => {
+        const qId = resp.questionId;
+        const value = resp.finalValueJson || resp.correctedValueJson || resp.rawExtractedValueJson;
 
-      const rowData: any[] = [
-        submission.participantIndex,
-        submission.participantNameCorrected ??
-          submission.participantNameExtracted ??
-          "",
-        submission.status,
-      ];
+        if (value && typeof value === "object") {
+          const valObj = value as any;
+          // Handle different formats based on what the worker/UI saves
+          // The user requested specific flattening rules:
+          
+          // MULTI_SELECT (usually an array in 'value' key or just an array)
+          const actualValue = valObj.value !== undefined ? valObj.value : valObj;
 
-      for (const question of questions) {
-        const response = responseMap.get(question.id);
-        if (!response) {
-          rowData.push("");
-          continue;
-        }
-
-        const val =
-          response.finalValueJson ??
-          response.correctedValueJson ??
-          response.rawExtractedValueJson;
-
-        if (!val) {
-          rowData.push("");
-          continue;
-        }
-
-        const parsed = val as any;
-        if (parsed.type === "checkbox") {
-          const selected: any[] = parsed.selected ?? [];
-          rowData.push(selected.map((s) => s?.label || s).join(", "));
-        } else if (parsed.type === "text") {
-          rowData.push(parsed.value ?? "");
+          if (Array.isArray(actualValue)) {
+            rowData[qId] = actualValue.join(", ");
+          } else if (typeof actualValue === "object" && actualValue !== null) {
+            // MATRIX (Row: Col mapping)
+            const matrixEntries = Object.entries(actualValue)
+              .map(([row, col]) => {
+                const colDisplay = Array.isArray(col) ? col.join(", ") : col;
+                return `${row}: ${colDisplay}`;
+              });
+            rowData[qId] = matrixEntries.join(", ");
+          } else {
+            rowData[qId] = String(actualValue ?? "");
+          }
         } else {
-          rowData.push(JSON.stringify(val));
+          rowData[qId] = value ?? "";
         }
-      }
+      });
 
-      const row = sheet.addRow(rowData);
-      // Color-code by status
-      if (submission.status === "FINALIZED") {
-        row.getCell(3).fill = {
-          type: "pattern",
-          pattern: "solid",
-          fgColor: { argb: "FFD1FAE5" },
-        };
-      } else if (submission.status === "NEEDS_REVIEW") {
-        row.getCell(3).fill = {
-          type: "pattern",
-          pattern: "solid",
-          fgColor: { argb: "FFFEF3C7" },
-        };
-      }
-    }
-
-    // Auto-fit columns
-    sheet.columns.forEach((col, i) => {
-      if (i < 3) {
-        col.width = 18;
-      } else {
-        col.width = 30;
-      }
+      worksheet.addRow(rowData);
     });
 
-    // Add metadata sheet
-    const metaSheet = workbook.addWorksheet("Export Info");
-    metaSheet.addRow(["Survey", batch.survey.title]);
-    metaSheet.addRow(["Batch", batch.batchName]);
-    metaSheet.addRow(["Export Date", new Date().toISOString()]);
-    metaSheet.addRow(["Total Submissions", batch.submissions.length]);
-    metaSheet.addRow(["Exported By", user.email ?? user.id]);
-
-    // Generate buffer
+    // 6. Generate Buffer and Return
     const buffer = await workbook.xlsx.writeBuffer();
-
-    const filename = `${batch.survey.title}-${batch.batchName}-export.xlsx`
-      .replace(/[^a-z0-9.\-_]/gi, "_")
-      .toLowerCase();
+    
+    const dateStr = new Date().toISOString().split("T")[0];
+    const safeBatchName = batch.batchName.replace(/[^a-z0-9]/gi, "_");
+    const filename = `${safeBatchName}_Results_${dateStr}.xlsx`;
 
     return new NextResponse(buffer, {
       headers: {
-        "Content-Type":
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "Content-Disposition": `attachment; filename="${filename}"`,
       },
     });
-  } catch (err: any) {
-    if (err?.code === "UNAUTHENTICATED")
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    console.error("Export error:", err);
-    return NextResponse.json({ error: "Export failed" }, { status: 500 });
+
+  } catch (error) {
+    console.error("Export Error:", error);
+    return new NextResponse("Export Failed", { status: 500 });
   }
 }

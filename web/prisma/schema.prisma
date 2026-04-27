@@ -212,6 +212,10 @@ model SurveyBatch {
   totalPages              Int?
   detectedSubmissionCount Int?
   errorMessage            String?
+  /// "NONE" | "QUEUED" | "PROCESSING" | "COMPLETE" | "FAILED"
+  analysisStatus          String        @default("NONE")
+  /// Full markdown report produced by Gemini 1.5 Pro. Null until analysis completes.
+  analysisReport          String?
 
   submissions SurveySubmission[]
   jobs        ExtractionJob[]
@@ -243,6 +247,10 @@ model SurveySubmission {
   sourceFileId             String
   sourcePageStart          Int
   sourcePageEnd            Int
+  /// True when the template was returned to draft and a question was edited after extraction.
+  isStale                  Boolean          @default(false)
+  /// JSON array of questionIds that changed while the template was in draft — used for smart partial re-extraction.
+  staleQuestionIds         Json?
 
   responses SurveyResponse[]
 
