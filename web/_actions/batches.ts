@@ -84,12 +84,17 @@ export async function getBatchProcessingState(batchId: string): Promise<{
   const [batch, pendingCount] = await Promise.all([
     prisma.surveyBatch.findUnique({
       where: { id: batchId },
-      select: { status: true },
+      select: { surveyId: true, status: true },
     }),
     prisma.surveySubmission.count({
       where: { batchId, confidenceScore: null },
     }),
   ]);
+
+  if (batch) {
+    revalidatePath(`/surveys/${batch.surveyId}/batches/${batchId}`);
+  }
+
   return { status: batch?.status ?? "FAILED", pendingCount };
 }
 

@@ -42,16 +42,24 @@ export function BatchPoller({ batchId, initialStatus, hasNullScores }: BatchPoll
       try {
         const { status, pendingCount } = await getBatchProcessingState(batchId);
 
-        // Refresh the server component whenever the status OR the count of pending submissions changes.
-        if (status !== prevStatus || pendingCount !== prevPendingCount) {
+        // Detect progress: status change OR a decrease in pending submissions.
+        const statusChanged = status !== prevStatus;
+        const progressMade = pendingCount < prevPendingCount && prevPendingCount !== -1;
+
+        if (statusChanged || progressMade) {
           prevStatus = status;
           prevPendingCount = pendingCount;
-          router.refresh();
-        }
+          
+          // Use a full reload to guarantee every RSC and client component is synced.
+          window.location.reload();
 
-        // Stop polling once everything has settled.
-        if (status !== "PROCESSING" && pendingCount === 0) {
-          clearInterval(interval);
+          // If we reached the end, clear the interval.
+          if (status !== "PROCESSING" && pendingCount === 0) {
+            clearInterval(interval);
+          }
+        } else if (prevPendingCount === -1) {
+          // Initial poll to set baseline count without reloading
+          prevPendingCount = pendingCount;
         }
       } catch {
         // Network hiccup — keep polling, don't crash.

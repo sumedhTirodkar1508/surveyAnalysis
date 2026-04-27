@@ -162,7 +162,6 @@ export async function reprocessSubmission(submissionId: string) {
     data: {
       status: "NEEDS_REVIEW",
       confidenceScore: null,        // NULL = "not yet processed" sentinel
-      ...(clearName ? { participantNameExtracted: null } : {}),
       isStale: false,
       staleQuestionIds: Prisma.DbNull,
     },
@@ -239,7 +238,6 @@ export async function syncAllStaleSubmissions(batchId: string) {
       data: {
         status: "NEEDS_REVIEW",
         confidenceScore: null,
-        ...(clearName ? { participantNameExtracted: null } : {}),
         isStale: false,
         staleQuestionIds: Prisma.DbNull,
       },

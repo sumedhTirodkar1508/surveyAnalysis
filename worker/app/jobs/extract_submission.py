@@ -231,23 +231,24 @@ MATRIX_SINGLE_SELECT | MATRIX_MULTI_SELECT
     JSON keys   = exact strings from "matrixRowsJson"   (the ROW labels, left column of table)
     JSON values = exact string(s) from "matrixColumnsJson" (the COLUMN labels, top row of table)
   ══════════════════════════════════════════════════════════════
+  For all MATRIX questions, the JSON keys MUST be the exact strings from "matrixRowsJson". 
+  The values MUST be the selected string(s) from "matrixColumnsJson". 
+  NEVER invert this order. Even if you see a different pattern, follow this axis rule strictly.
+
   - For MATRIX_SINGLE_SELECT: each key maps to a SINGLE string (the checked column).
   - For MATRIX_MULTI_SELECT:  each key maps to an ARRAY of strings (all checked columns).
   - Every row label MUST appear as a key, even if no column is selected (use null or []).
   - NEVER swap rows and columns. NEVER use column labels as keys.
 
   Concrete example — suppose the schema has:
-    matrixRowsJson:    ["Smartphone", "Tablet", "Desktop/Laptop"]
+    matrixRowsJson:    ["Smart Phone", "Laptop", "Tablet"]
     matrixColumnsJson: ["Daily", "Weekly", "Occasionally", "Never"]
 
-  Correct MATRIX_SINGLE_SELECT output:
-    {{"Smartphone": "Daily", "Tablet": "Never", "Desktop/Laptop": "Occasionally"}}
-
-  Correct MATRIX_MULTI_SELECT output:
-    {{"Smartphone": ["Daily", "Weekly"], "Tablet": [], "Desktop/Laptop": ["Occasionally"]}}
+  Correct output:
+    {{"Smart Phone": "Daily", "Laptop": "Weekly", "Tablet": "Never"}}
 
   WRONG (axes inverted — do NOT do this):
-    {{"Daily": "Smartphone", "Never": "Tablet"}}   ← keys are columns, FORBIDDEN
+    {{"Daily": "Smart Phone", "Weekly": "Laptop"}}   ← keys are columns, FORBIDDEN
 
 ════════════════════════════════
 CONFIDENCE & REVIEW RULES
@@ -288,7 +289,10 @@ Return ONLY a valid JSON array of these objects -- no markdown, no extra keys, n
             response = client.models.generate_content(
                 model=model,
                 contents=image_parts + [prompt],
-                config=types.GenerateContentConfig(response_mime_type="application/json"),
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.0,
+                ),
             )
             results = json.loads(response.text.strip())
             logger.info(f"Gemini extraction succeeded on {tier_label}:")
@@ -329,10 +333,10 @@ Return ONLY a valid JSON array of these objects -- no markdown, no extra keys, n
                     next_label = f"Tier {tier_idx + 2} ({MODEL_TIERS[tier_idx + 1]})"
                     if is_rate_or_unavailable:
                         logger.warning(
-                            f"{tier_label} rate-limited/unavailable — waiting 2 s before "
+                            f"{tier_label} rate-limited/unavailable — waiting 3 s before "
                             f"switching to {next_label}. Error: {e}"
                         )
-                        time.sleep(2)   # ← Patience Patch: let Tier-1 breathe
+                        time.sleep(3)   # ← Patience Patch: let Tier-1 breathe
                     else:
                         logger.warning(
                             f"{tier_label} model not found — switching to {next_label}. "
