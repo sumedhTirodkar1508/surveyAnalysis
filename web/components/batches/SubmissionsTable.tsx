@@ -118,7 +118,11 @@ export function SubmissionsTable({ submissions, surveyId, batchId }: Submissions
                     )}
                     {/* Don't allow reprocess on finalized submissions */}
                     {s.status !== "FINALIZED" && (
-                      <ReprocessButton submissionId={s.id} isStale={isStale} />
+                      <ReprocessButton
+                        submissionId={s.id}
+                        isStale={isStale}
+                        confidenceScore={s.confidenceScore}
+                      />
                     )}
                   </div>
                 </td>

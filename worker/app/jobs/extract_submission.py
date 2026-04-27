@@ -332,11 +332,16 @@ Return ONLY a valid JSON array of these objects -- no markdown, no extra keys, n
                 if has_next:
                     next_label = f"Tier {tier_idx + 2} ({MODEL_TIERS[tier_idx + 1]})"
                     if is_rate_or_unavailable:
+                        # 503/UNAVAILABLE gets a longer pause so Tier-1 can recover
+                        # from a transient outage before we give up on it.
+                        # 429/RESOURCE_EXHAUSTED is a rate-limit — shorter pause is fine.
+                        is_503 = any(x in err_str for x in ["503", "UNAVAILABLE"])
+                        sleep_secs = 10 if is_503 else 3
                         logger.warning(
-                            f"{tier_label} rate-limited/unavailable — waiting 3 s before "
+                            f"{tier_label} rate-limited/unavailable — waiting {sleep_secs} s before "
                             f"switching to {next_label}. Error: {e}"
                         )
-                        time.sleep(3)   # ← Patience Patch: let Tier-1 breathe
+                        time.sleep(sleep_secs)  # ← Patience Patch: let Tier-1 breathe
                     else:
                         logger.warning(
                             f"{tier_label} model not found — switching to {next_label}. "
@@ -361,6 +366,21 @@ Return ONLY a valid JSON array of these objects -- no markdown, no extra keys, n
     # 6. Save Answers
     # Build a lookup of questionId → questionType so we can identify the NAME field.
     question_type_map = {str(q["id"]): q["questionType"] for q in questions}
+
+    # Build matrix metadata for brute-force axis inversion correction (see post-processing below).
+    # Keys are valid row/column label sets per question so we can detect if the model
+    # accidentally returned {col: row} instead of the required {row: col} layout.
+    question_matrix_meta: dict[str, dict] = {}
+    for q in questions:
+        q_type_str = str(q["questionType"]) if q["questionType"] else ""
+        if "MATRIX" in q_type_str:
+            rows: list = list(q["matrixRowsJson"]) if q["matrixRowsJson"] else []
+            cols: list = list(q["matrixColumnsJson"]) if q["matrixColumnsJson"] else []
+            question_matrix_meta[str(q["id"])] = {
+                "rows": set(rows),
+                "cols": set(cols),
+                "rows_list": rows,
+            }
 
     confidences = []
     participant_name: str | None = None
@@ -403,6 +423,49 @@ Return ONLY a valid JSON array of these objects -- no markdown, no extra keys, n
                 )
                 review = True
                 conf = min(conf, 0.75)
+
+        elif q_type in ("MATRIX_SINGLE_SELECT", "MATRIX_MULTI_SELECT"):
+            # ── Brute-force axis inversion correction ────────────────────────────
+            # Despite strict prompting, Tier-2/3 models occasionally return the
+            # matrix with inverted axes: {col: row} instead of the required {row: col}.
+            # Detection heuristic: if ALL answer keys are known column labels AND
+            # none of them is a row label, the axes are flipped — correct them.
+            meta = question_matrix_meta.get(str(q_id))
+            if meta and isinstance(answer, dict) and answer:
+                answer_keys = set(str(k) for k in answer.keys())
+                keys_are_cols = (
+                    answer_keys.issubset(meta["cols"])
+                    and not answer_keys.issubset(meta["rows"])
+                    and bool(meta["cols"])  # guard: don't trigger if cols is empty
+                )
+                if keys_are_cols:
+                    if q_type == "MATRIX_SINGLE_SELECT":
+                        # Inverted: {col: row_str} → correct: {row_str: col}
+                        fixed = {str(v): str(k) for k, v in answer.items() if v}
+                        logger.warning(
+                            f"MATRIX_SINGLE_SELECT Q {q_id} had inverted axes — auto-corrected. "
+                            f"Original keys (cols): {list(answer.keys())}"
+                        )
+                        answer = fixed
+                    else:
+                        # MATRIX_MULTI_SELECT inverted: {col: [row, ...]} → {row: [col, ...]}
+                        fixed_multi: dict[str, list] = {row: [] for row in meta["rows_list"]}
+                        for col_key, row_vals in answer.items():
+                            if isinstance(row_vals, list):
+                                for rv in row_vals:
+                                    rv_str = str(rv)
+                                    if rv_str in fixed_multi:
+                                        fixed_multi[rv_str].append(str(col_key))
+                            elif isinstance(row_vals, str) and row_vals in fixed_multi:
+                                fixed_multi[row_vals].append(str(col_key))
+                        logger.warning(
+                            f"MATRIX_MULTI_SELECT Q {q_id} had inverted axes — auto-corrected. "
+                            f"Original keys (cols): {list(answer.keys())}"
+                        )
+                        answer = fixed_multi
+                    # Cap confidence and force human review on any auto-corrected result.
+                    review = True
+                    conf = min(conf, 0.65)
 
         confidences.append(conf)
 
