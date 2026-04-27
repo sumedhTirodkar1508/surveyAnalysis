@@ -25,8 +25,13 @@ from google.genai import types
 
 logger = logging.getLogger(__name__)
 
-# Use the highest-quality reasoning model for report writing.
-ANALYSIS_MODEL = "gemini-1.5-pro"
+# Three-tier model waterfall for batch analysis.
+# Tried in order; each tier is skipped on 429 / 404 / 503 / daily-quota errors.
+TIER_1_MODEL = "gemini-3.1-flash-lite-preview"
+TIER_2_MODEL = "gemma-4-26b-a4b-it"
+TIER_3_MODEL = "gemma-4-31b-it"
+
+MODEL_TIERS = [TIER_1_MODEL, TIER_2_MODEL, TIER_3_MODEL]
 
 
 async def handle_analyze_batch(data: dict):
@@ -40,9 +45,11 @@ async def handle_analyze_batch(data: dict):
     except Exception as exc:
         # Mark the batch analysis as failed so the UI reflects the error.
         try:
+            error_msg = str(exc)
             await conn.execute(
-                'UPDATE "SurveyBatch" SET "analysisStatus" = \'FAILED\' WHERE id = $1',
+                'UPDATE "SurveyBatch" SET "analysisStatus" = \'FAILED\', "analysisReport" = $2 WHERE id = $1',
                 batch_id,
+                f"Analysis error: {error_msg}"
             )
         except Exception:
             pass
@@ -246,36 +253,48 @@ Rules:
 
     client = genai.Client(api_key=api_key)
 
-    max_retries = 3
     report_text: str | None = None
-    for attempt in range(max_retries):
+    success = False
+
+    # Walk MODEL_TIERS in order. Each tier gets exactly one attempt.
+    for tier_idx, model in enumerate(MODEL_TIERS):
+        tier_label = f"Tier {tier_idx + 1} ({model})"
         try:
             response = client.models.generate_content(
-                model=ANALYSIS_MODEL,
+                model=model,
                 contents=[prompt],
                 config=types.GenerateContentConfig(
-                    temperature=0.4,   # somewhat creative but grounded in the data
+                    temperature=0.4,
                 ),
             )
             report_text = response.text.strip()
-            logger.info(
-                f"Batch {batch_id} analysis complete via {ANALYSIS_MODEL} "
-                f"({len(report_text)} chars)"
-            )
+            logger.info(f"Batch {batch_id} analysis complete via {tier_label}")
+            success = True
             break
+
         except Exception as e:
             err_str = str(e).upper()
-            if any(x in err_str for x in ["429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE"]):
-                wait = (attempt + 1) * 20
-                if attempt < max_retries - 1:
+            has_next = tier_idx < len(MODEL_TIERS) - 1
+            is_rate_or_unavailable = any(x in err_str for x in ["429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE"])
+
+            if has_next:
+                next_label = f"Tier {tier_idx + 2} ({MODEL_TIERS[tier_idx + 1]})"
+                if is_rate_or_unavailable:
+                    # Patience Patch: wait before falling back to a lower tier
+                    is_503 = any(x in err_str for x in ["503", "UNAVAILABLE"])
+                    sleep_secs = 10 if is_503 else 3
                     logger.warning(
-                        f"Gemini {ANALYSIS_MODEL} rate-limited — retrying in {wait}s "
-                        f"(attempt {attempt+1}/{max_retries}). Error: {e}"
+                        f"{tier_label} rate-limited/unavailable — waiting {sleep_secs} s before "
+                        f"switching to {next_label}. Error: {e}"
                     )
-                    time.sleep(wait)
-                    continue
-            logger.error(f"Gemini analysis failed: {e}")
-            raise
+                    time.sleep(sleep_secs)
+                else:
+                    logger.warning(
+                        f"{tier_label} error — switching to {next_label}. Error: {e}"
+                    )
+            else:
+                logger.error(f"All model tiers failed for batch analysis. Last error: {e}")
+                raise
 
     if not report_text:
         raise RuntimeError("Gemini returned an empty report after all retries.")

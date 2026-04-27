@@ -14,6 +14,14 @@ export async function enqueueJob(name: string, data: object | null): Promise<str
     started = true;
   }
 
-  // pg-boss v10+ auto-creates the queue with all required defaults on first send()
+  // Ensure the queue metadata exists in the pgboss.queue table.
+  // This is required when the consumer is a non-SDK poller (like our Python worker)
+  // because send() may fail if it doesn't find the queue definition.
+  try {
+    await boss.createQueue(name);
+  } catch (e) {
+    // Ignore error if queue already exists
+  }
+
   return boss.send(name, data);
 }

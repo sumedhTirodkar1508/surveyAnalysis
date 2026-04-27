@@ -43,9 +43,15 @@ export function BatchPoller({ batchId, initialStatus, hasNullScores }: BatchPoll
         const { status, pendingCount } = await getBatchProcessingState(batchId);
 
         if (prevPendingCount === -1) {
-          // First tick: establish baseline without triggering a refresh.
+          // First tick: establish baseline.
           prevPendingCount = pendingCount;
           prevStatus = status;
+
+          // If work finished before our first poll, reload immediately.
+          if (hasNullScores && pendingCount === 0 && status !== "PROCESSING") {
+            window.location.reload();
+            clearInterval(interval);
+          }
         } else {
           // Detect progress: status change OR fewer pending submissions than last tick.
           const statusChanged = status !== prevStatus;
@@ -54,9 +60,8 @@ export function BatchPoller({ batchId, initialStatus, hasNullScores }: BatchPoll
           if (statusChanged || progressMade) {
             prevStatus = status;
             prevPendingCount = pendingCount;
-            // Soft RSC refresh: re-fetches server data without a full page reload.
-            // clearInterval below remains reachable (unlike window.location.reload()).
-            router.refresh();
+            // Force full reload as requested for absolute sync.
+            window.location.reload();
           }
         }
 

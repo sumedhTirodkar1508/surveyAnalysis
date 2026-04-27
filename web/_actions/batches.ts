@@ -121,10 +121,27 @@ export async function triggerBatchAnalysis(batchId: string): Promise<void> {
     data: { analysisStatus: "QUEUED" },
   });
 
-  const { enqueueJob } = await import("@/lib/queue");
-  await enqueueJob("batch.analyze", { batchId });
-
-  revalidatePath(`/surveys/${batch.surveyId}/batches/${batchId}`);
+  try {
+    const { enqueueJob } = await import("@/lib/queue");
+    await enqueueJob("batch.analyze", { batchId });
+    
+    revalidatePath(`/surveys/${batch.surveyId}/batches/${batchId}`);
+    revalidatePath(`/surveys/${batch.surveyId}/batches/${batchId}/analysis`);
+  } catch (error: any) {
+    console.error("Failed to enqueue batch analysis:", error);
+    
+    // Reset status to FAILED so the user can see the error and retry
+    await prisma.surveyBatch.update({
+      where: { id: batchId },
+      data: { 
+        analysisStatus: "FAILED",
+        analysisReport: `Queue error: ${error.message ?? "Unknown error"}`
+      },
+    });
+    
+    revalidatePath(`/surveys/${batch.surveyId}/batches/${batchId}/analysis`);
+    throw error;
+  }
 }
 
 export async function getBatch(batchId: string) {
