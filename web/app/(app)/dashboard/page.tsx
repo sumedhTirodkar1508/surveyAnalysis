@@ -11,58 +11,59 @@ export default async function DashboardPage() {
   const userId = session?.user?.id;
   const isAdmin = session?.user?.role === "ADMIN";
 
-  // Aggregate stats
-  const [surveyCount, batchCount, needsReviewCount, finalizedCount, recentBatches, allSubmissions, recentFiles] =
-    await Promise.all([
-      prisma.survey.count({ where: isAdmin ? {} : { createdById: userId! } }),
-      prisma.surveyBatch.count({ where: isAdmin ? {} : { uploadedById: userId! } }),
-      prisma.surveySubmission.count({ where: { status: "NEEDS_REVIEW" } }),
-      prisma.surveySubmission.count({ where: { status: "FINALIZED" } }),
-      prisma.surveyBatch.findMany({
-        take: 6,
-        orderBy: { createdAt: "desc" },
-        include: {
-          survey: { select: { id: true, title: true } },
-          _count: { select: { submissions: true } },
-        },
-        where: isAdmin ? {} : { uploadedById: userId! },
-      }),
-      prisma.surveySubmission.findMany({
-        select: {
-          participantNameExtracted: true,
-          participantNameCorrected: true,
-          confidenceScore: true,
-        }
-      }),
-      prisma.batchFile.findMany({
-        take: 5,
-        orderBy: { createdAt: "desc" },
-        include: {
-          batch: {
-            include: { survey: true }
-          }
-        }
-      })
-    ]);
+  // Aggregate stats — all queries run in parallel.
+  // Unique-participant count uses a raw SQL DISTINCT on the COALESCE'd name
+  // because Prisma's groupBy cannot express computed column distinctness.
+  const [
+    surveyCount,
+    batchCount,
+    needsReviewCount,
+    finalizedCount,
+    recentBatches,
+    avgConfidenceAgg,
+    uniqueParticipantRows,
+    recentFiles,
+  ] = await Promise.all([
+    prisma.survey.count({ where: isAdmin ? {} : { createdById: userId! } }),
+    prisma.surveyBatch.count({ where: isAdmin ? {} : { uploadedById: userId! } }),
+    prisma.surveySubmission.count({ where: { status: "NEEDS_REVIEW" } }),
+    prisma.surveySubmission.count({ where: { status: "FINALIZED" } }),
+    prisma.surveyBatch.findMany({
+      take: 6,
+      orderBy: { createdAt: "desc" },
+      include: {
+        survey: { select: { id: true, title: true } },
+        _count: { select: { submissions: true } },
+      },
+      where: isAdmin ? {} : { uploadedById: userId! },
+    }),
+    // Single-pass average — no JS iteration over rows.
+    prisma.surveySubmission.aggregate({ _avg: { confidenceScore: true } }),
+    // COUNT(DISTINCT ...) on a computed column — cannot be expressed in Prisma ORM.
+    prisma.$queryRaw<[{ count: bigint }]>`
+      SELECT COUNT(
+        DISTINCT LOWER(TRIM(COALESCE(
+          "participantNameCorrected",
+          "participantNameExtracted",
+          'Anonymous'
+        )))
+      ) AS count
+      FROM "SurveySubmission"
+    `,
+    prisma.batchFile.findMany({
+      take: 5,
+      orderBy: { createdAt: "desc" },
+      include: { batch: { include: { survey: true } } },
+    }),
+  ]);
 
-  // Calculate unique residents
-  const participantNames = new Set(
-    allSubmissions.map(s => (s.participantNameCorrected || s.participantNameExtracted || "Anonymous").toLowerCase().trim())
-  );
-  
-  // Calculate average tech confidence
-  const confidenceScores = allSubmissions
-    .map(s => s.confidenceScore)
-    .filter((score): score is number => score !== null);
-  
-  const avgConfidence = confidenceScores.length > 0 
-    ? (confidenceScores.reduce((a, b) => a + b, 0) / confidenceScores.length)
-    : 0;
+  const avgConfidence = avgConfidenceAgg._avg.confidenceScore ?? 0;
+  const uniqueResidentsCount = Number(uniqueParticipantRows[0]?.count ?? 0);
 
   const stats = [
     {
       label: "Residents Surveyed",
-      value: participantNames.size,
+      value: uniqueResidentsCount,
       icon: User,
       color: "bg-blue-50 text-blue-600",
       href: "/participants",
@@ -214,7 +215,6 @@ export default async function DashboardPage() {
           </div>
         </div>
       </div>
-    </div>
     </div>
   );
 }

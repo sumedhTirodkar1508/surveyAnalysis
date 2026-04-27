@@ -7,48 +7,45 @@ import { Input } from "@/components/ui/input";
 
 export const dynamic = "force-dynamic";
 
+interface ParticipantRow {
+  name: string;
+  latestConfidence: number | null;
+  latestSubmissionId: string;
+  surveyId: string;
+  batchId: string;
+  lastSeen: Date;
+}
+
 export default async function ParticipantsPage() {
-  // 1. Fetch all submissions to aggregate participants.
-  // We want unique participants (by corrected or extracted name).
-  const submissions = await prisma.surveySubmission.findMany({
-    orderBy: { batch: { createdAt: "desc" } },
-    include: {
-      batch: {
-        select: {
-          surveyId: true,
-          createdAt: true,
-        },
-      },
-    },
-  });
-
-  // 2. Aggregate unique participants
-  const participantsMap = new Map<string, {
-    name: string;
-    latestConfidence: number | null;
-    latestSubmissionId: string;
-    surveyId: string;
-    batchId: string;
-    lastSeen: Date;
-  }>();
-
-  for (const sub of submissions) {
-    const name = sub.participantNameCorrected || sub.participantNameExtracted || "Anonymous";
-    const nameKey = name.toLowerCase().trim();
-
-    if (!participantsMap.has(nameKey)) {
-      participantsMap.set(nameKey, {
-        name,
-        latestConfidence: sub.confidenceScore,
-        latestSubmissionId: sub.id,
-        surveyId: sub.batch.surveyId,
-        batchId: sub.batchId,
-        lastSeen: sub.batch.createdAt,
-      });
-    }
-  }
-
-  const participants = Array.from(participantsMap.values()).sort((a, b) => b.lastSeen.getTime() - a.lastSeen.getTime());
+  // Single efficient query: DISTINCT ON deduplicates by normalised name and
+  // picks the most-recent batch per participant. The outer ORDER BY sorts the
+  // result set by recency for the UI.
+  const participants = await prisma.$queryRaw<ParticipantRow[]>`
+    SELECT
+      name,
+      "latestConfidence",
+      "latestSubmissionId",
+      "surveyId",
+      "batchId",
+      "lastSeen"
+    FROM (
+      SELECT DISTINCT ON (
+        LOWER(TRIM(COALESCE(s."participantNameCorrected", s."participantNameExtracted", 'Anonymous')))
+      )
+        COALESCE(s."participantNameCorrected", s."participantNameExtracted", 'Anonymous') AS name,
+        s."confidenceScore"                                                              AS "latestConfidence",
+        s.id                                                                             AS "latestSubmissionId",
+        sb."surveyId",
+        s."batchId",
+        sb."createdAt"                                                                   AS "lastSeen"
+      FROM   "SurveySubmission" s
+      JOIN   "SurveyBatch"      sb ON s."batchId" = sb.id
+      ORDER BY
+        LOWER(TRIM(COALESCE(s."participantNameCorrected", s."participantNameExtracted", 'Anonymous'))),
+        sb."createdAt" DESC
+    ) sub
+    ORDER BY "lastSeen" DESC
+  `;
 
   return (
     <div className="space-y-6">
